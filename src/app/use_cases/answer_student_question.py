@@ -1,6 +1,6 @@
 import logging
-from typing import Optional
 
+from src.app.dtos.query_dto import QueryDTO
 from src.domain.entities.chat_session import Message
 from src.domain.repositories.document_repository import DocumentRepository
 from src.domain.repositories.chat_repository import ChatRepository
@@ -32,18 +32,18 @@ class AnswerStudentQuestionUseCase:
         self.embedding_model = embedding_model
         self.top_k = top_k
 
-    async def execute(self, user_id: str, question: str, subject: Optional[str] = None) -> str:
+    async def execute(self, query: QueryDTO) -> str:
         # 1. Recupera o histórico de conversas do aluno
-        session = await self.chat_repo.get_session(user_id)
+        session = await self.chat_repo.get_session(query.user_id)
 
         # 2. Gera embedding e busca chunks relevantes no MongoDB
         query_vectors = await self.openai_adapter.generate_embeddings(
-            [question], model=self.embedding_model
+            [query.question], model=self.embedding_model
         )
         relevant_chunks = await self.doc_repo.search_similar_chunks(
             query_vector=query_vectors[0],
             top_k=self.top_k,
-            subject=subject,
+            subject=query.subject,
         )
 
         if not relevant_chunks:
@@ -53,19 +53,18 @@ class AnswerStudentQuestionUseCase:
         # PromptBuilderService, fora da camada de aplicação).
         context_text = PromptBuilderService.build_context(relevant_chunks)
         history = [{"role": msg.role, "content": msg.content} for msg in session.messages]
-        messages = PromptBuilderService.build_messages(history, context_text, question)
+        messages = PromptBuilderService.build_messages(history, context_text, query.question)
 
-        # 4. Chama o modelo de chat
-        response = await self.openai_adapter.client.chat.completions.create(
-            model=self.chat_model,
+        # 4. Chama o modelo de chat (encapsulado no adaptador, sem expor
+        # detalhes do cliente da OpenAI à camada de aplicação)
+        answer_text = await self.openai_adapter.generate_chat_completion(
             messages=messages,
+            model=self.chat_model,
             temperature=0.3,
         )
 
-        answer_text = response.choices[0].message.content.strip()
-
         # 5. Salva as mensagens no histórico
-        await self.chat_repo.add_message(user_id, Message(role="user", content=question))
-        await self.chat_repo.add_message(user_id, Message(role="assistant", content=answer_text))
+        await self.chat_repo.add_message(query.user_id, Message(role="user", content=query.question))
+        await self.chat_repo.add_message(query.user_id, Message(role="assistant", content=answer_text))
 
         return answer_text

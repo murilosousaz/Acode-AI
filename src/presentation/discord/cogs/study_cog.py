@@ -2,6 +2,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from src.app.dtos.query_dto import QueryDTO
 from src.app.use_cases.answer_student_question import AnswerStudentQuestionUseCase
 from src.domain.repositories.chat_repository import ChatRepository
 from src.domain.value_objects.subject import Subject
@@ -53,9 +54,7 @@ class StudyCog(commands.Cog):
 
         try:
             answer = await self.use_case.execute(
-                user_id=user_id,
-                question=pergunta,
-                subject=subject_filter,
+                QueryDTO(user_id=user_id, question=pergunta, subject=subject_filter)
             )
 
             chunks = DiscordFormatter.split_message(answer)

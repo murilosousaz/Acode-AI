@@ -30,7 +30,7 @@ src/
 
 ## Pré-requisitos
 
-- Python 3.13+ e [uv](https://docs.astral.sh/uv/)
+- Python 3.13 e [uv](https://docs.astral.sh/uv/)
 - Uma instância do MongoDB com suporte a Atlas Vector Search (o
   `docker-compose.yml` já sobe `mongodb-atlas-local` para desenvolvimento)
 - Uma chave de API da OpenAI
@@ -100,6 +100,7 @@ Isso sobe o MongoDB e o bot juntos, lendo as variáveis do `.env`.
 | `OPENAI_API_KEY`             | ✅          | Chave de API da OpenAI                                      |
 | `OPENAI_CHAT_MODEL`          |             | Modelo de chat (padrão: `gpt-4o-mini`)                      |
 | `OPENAI_EMBEDDING_MODEL`     |             | Modelo de embeddings (padrão: `text-embedding-3-small`)     |
+| `EMBEDDING_DIMENSIONS`       |             | Dimensão do vetor de embedding, deve bater com o modelo acima (padrão: `1536`) |
 | `RATE_LIMIT_REQUESTS`        |             | Máx. de perguntas por usuário na janela (padrão: 5)         |
 | `RATE_LIMIT_WINDOW_SECONDS`  |             | Duração da janela de rate limit em segundos (padrão: 60)    |
 | `MONGO_ROOT_USERNAME`        |             | Usuário admin do container Mongo local (docker-compose)     |
@@ -113,3 +114,48 @@ Isso sobe o MongoDB e o bot juntos, lendo as variáveis do `.env`.
 - Não há suite de testes automatizados ainda.
 - `PyMuPDFAdapter` não faz OCR: PDFs digitalizados (imagem) não terão texto
   extraído.
+- O driver `motor` está em modo de depreciação desde maio/2026 (fim do
+  suporte previsto para maio/2027). Recomenda-se migrar para a
+  [API assíncrona nativa do PyMongo](https://www.mongodb.com/docs/languages/python/pymongo-driver/current/reference/migration/)
+  (`pymongo`, já presente nas dependências) quando possível.
+- `Vector` (`src/domain/value_objects/vector.py`) e `Student`
+  (`src/domain/entities/student.py`) são peças de domínio já implementadas
+  e prontas para uso, mas ainda não consumidas por nenhum caso de uso —
+  ficam disponíveis para futuras funcionalidades (ex.: comparação de
+  embeddings fora do MongoDB, um comando `/perfil`).
+
+## Correções aplicadas nesta revisão
+
+- Corrigida a incompatibilidade de versão do Python entre `pyproject.toml`
+  (exigia `>=3.14`), `.python-version` (`3.14`) e o `Dockerfile`
+  (`python:3.13-slim`), que impediria o build da imagem Docker.
+- Adicionados os arquivos `__init__.py` que faltavam em praticamente todos
+  os subpacotes de `src/` e em `scripts/`.
+- `DiscordFormatter.split_message` não quebrava uma única linha/parágrafo
+  maior que o limite, podendo gerar uma mensagem maior que o permitido pelo
+  Discord (erro HTTP 400 ao responder `/duvida`).
+- A matéria informada na ingestão (`/ingest_pdf`, `ingest_cli.py`,
+  `ingest_bulks_pdf.py`) era um texto livre, enquanto a busca em `/duvida`
+  usa um combobox fixo (`Subject`) — um material ingerido como "física"
+  nunca seria encontrado ao filtrar por "Fisica". Agora a matéria é sempre
+  normalizada contra o enum `Subject` (`Subject.from_string`), tanto na
+  ingestão quanto na busca.
+- `scripts/ingest_cli.py` e `scripts/ingest_bulks_pdf.py` não repassavam
+  `OPENAI_EMBEDDING_MODEL` do `.env` para o caso de uso de ingestão, usando
+  sempre o valor padrão do código.
+- `scripts/create_vector_index.py` podia falhar ao tentar criar o índice
+  vetorial antes de existir qualquer documento na coleção; agora garante
+  que a coleção exista antes, usa a dimensão configurável
+  (`EMBEDDING_DIMENSIONS`) em vez de um valor fixo, e aguarda o índice
+  ficar pronto.
+- `AnswerStudentQuestionUseCase` chamava `openai_adapter.client` diretamente
+  (vazando um detalhe de infraestrutura para a camada de aplicação); a
+  chamada ao modelo de chat agora está encapsulada em
+  `OpenAIAdapter.generate_chat_completion`.
+- Implementados os arquivos de domínio que estavam vazios:
+  `src/app/dtos/query_dto.py` (agora usado por `AnswerStudentQuestionUseCase`
+  e `StudyCog`), `src/domain/value_objects/vector.py` e
+  `src/domain/entities/student.py`.
+- `AdminCog.ingest_pdf` agora aceita PDFs com extensão em maiúsculas
+  (`.PDF`) e usa um arquivo temporário mais robusto entre sistemas
+  operacionais.
