@@ -1,10 +1,10 @@
-import fitz  # PyMuPDF
+import pymupdf
 from typing import List
 
 class PyMuPDFAdapter:
     @staticmethod
     def extract_text_from_pdf(file_path: str) -> str:
-        doc = fitz.open(file_path)
+        doc = pymupdf.open(file_path)
         pages_text: List[str] = []
 
         for page_num in range(len(doc)):

@@ -1,17 +1,30 @@
-version: '3.8'
-
 services:
   mongodb:
     image: mongodb/mongodb-atlas-local:latest
-    container_name: acodeai
-    restart: always
+    container_name: acodeai-mongo
+    restart: unless-stopped
     ports:
       - "27017:27017"
     environment:
-      MONGODB_INITDB_ROOT_USERNAME: admin
-      MONGODB_INITDB_ROOT_PASSWORD: admin
+      MONGODB_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-admin}
+      MONGODB_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?defina MONGO_ROOT_PASSWORD no .env}
     volumes:
       - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  bot:
+    build: .
+    container_name: acodeai-bot
+    restart: unless-stopped
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    env_file:
+      - .env
 
 volumes:
   mongo_data:
