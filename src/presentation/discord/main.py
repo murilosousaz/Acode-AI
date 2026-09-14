@@ -48,7 +48,14 @@ async def main():
 
     doc_repo = MongoDocumentRepository(db_context.db)
     chat_repo = MongoChatRepository(db_context.db)
-    openai_adapter = OpenAIAdapter(api_key=settings.OPENAI_API_KEY)
+    # Embeddings no Google (camada gratuita); chat no DeepSeek. Ambos
+    # expõem um endpoint compatível com o formato da OpenAI.
+    embedding_adapter = OpenAIAdapter(
+        api_key=settings.GOOGLE_API_KEY, base_url=settings.GOOGLE_EMBEDDING_BASE_URL
+    )
+    chat_adapter = OpenAIAdapter(
+        api_key=settings.DEEPSEEK_API_KEY, base_url=settings.DEEPSEEK_BASE_URL
+    )
     rate_limiter = UserRateLimiter(
         requests_limit=settings.RATE_LIMIT_REQUESTS,
         window_seconds=settings.RATE_LIMIT_WINDOW_SECONDS,
@@ -57,14 +64,15 @@ async def main():
     rag_use_case = AnswerStudentQuestionUseCase(
         doc_repo,
         chat_repo,
-        openai_adapter,
-        chat_model=settings.OPENAI_CHAT_MODEL,
-        embedding_model=settings.OPENAI_EMBEDDING_MODEL,
+        embedding_adapter,
+        chat_adapter,
+        chat_model=settings.DEEPSEEK_CHAT_MODEL,
+        embedding_model=settings.GOOGLE_EMBEDDING_MODEL,
     )
     ingest_use_case = IngestEducationalMaterialUseCase(
         doc_repo,
-        openai_adapter,
-        embedding_model=settings.OPENAI_EMBEDDING_MODEL,
+        embedding_adapter,
+        embedding_model=settings.GOOGLE_EMBEDDING_MODEL,
     )
 
     await bot.add_cog(StudyCog(bot, rag_use_case, chat_repo, rate_limiter))

@@ -16,13 +16,16 @@ class IngestEducationalMaterialUseCase:
     def __init__(
         self,
         doc_repo: DocumentRepository,
-        openai_adapter: OpenAIAdapter,
+        embedding_adapter: OpenAIAdapter,
         embedding_model: str = "text-embedding-3-small",
         chunk_size: int = 800,
         chunk_overlap: int = 150,
     ):
         self.doc_repo = doc_repo
-        self.openai_adapter = openai_adapter
+        # Ingestão só gera embeddings (não chama chat), então precisa de um
+        # único adaptador — o que estiver configurado como provedor de
+        # embeddings (OpenAI).
+        self.embedding_adapter = embedding_adapter
         self.embedding_model = embedding_model
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
@@ -46,7 +49,7 @@ class IngestEducationalMaterialUseCase:
             return 0
 
         # 3. Geração de embeddings
-        embeddings = await self.openai_adapter.generate_embeddings(
+        embeddings = await self.embedding_adapter.generate_embeddings(
             text_chunks, model=self.embedding_model
         )
 

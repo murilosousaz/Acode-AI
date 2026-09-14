@@ -19,9 +19,11 @@ async def main():
     await connect_to_mongo()
 
     doc_repo = MongoDocumentRepository(db_context.db)
-    openai_adapter = OpenAIAdapter(api_key=settings.OPENAI_API_KEY)
+    embedding_adapter = OpenAIAdapter(
+        api_key=settings.GOOGLE_API_KEY, base_url=settings.GOOGLE_EMBEDDING_BASE_URL
+    )
     use_case = IngestEducationalMaterialUseCase(
-        doc_repo, openai_adapter, embedding_model=settings.OPENAI_EMBEDDING_MODEL
+        doc_repo, embedding_adapter, embedding_model=settings.GOOGLE_EMBEDDING_MODEL
     )
 
     pdf_files = list(RAW_PDFS_DIR.glob("*.pdf"))

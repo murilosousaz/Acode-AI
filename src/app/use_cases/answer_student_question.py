@@ -20,14 +20,20 @@ class AnswerStudentQuestionUseCase:
         self,
         doc_repo: DocumentRepository,
         chat_repo: ChatRepository,
-        openai_adapter: OpenAIAdapter,
+        embedding_adapter: OpenAIAdapter,
+        chat_adapter: OpenAIAdapter,
         chat_model: str = "gpt-4o-mini",
         embedding_model: str = "text-embedding-3-small",
         top_k: int = 4,
     ):
         self.doc_repo = doc_repo
         self.chat_repo = chat_repo
-        self.openai_adapter = openai_adapter
+        # Dois adaptadores porque o provedor de embeddings (OpenAI) e o de
+        # chat (ex.: DeepSeek) podem ser diferentes. Ambos implementam a
+        # mesma interface (OpenAIAdapter), então cada um só é usado para o
+        # método correspondente.
+        self.embedding_adapter = embedding_adapter
+        self.chat_adapter = chat_adapter
         self.chat_model = chat_model
         self.embedding_model = embedding_model
         self.top_k = top_k
@@ -37,7 +43,7 @@ class AnswerStudentQuestionUseCase:
         session = await self.chat_repo.get_session(query.user_id)
 
         # 2. Gera embedding e busca chunks relevantes no MongoDB
-        query_vectors = await self.openai_adapter.generate_embeddings(
+        query_vectors = await self.embedding_adapter.generate_embeddings(
             [query.question], model=self.embedding_model
         )
         relevant_chunks = await self.doc_repo.search_similar_chunks(
@@ -57,7 +63,7 @@ class AnswerStudentQuestionUseCase:
 
         # 4. Chama o modelo de chat (encapsulado no adaptador, sem expor
         # detalhes do cliente da OpenAI à camada de aplicação)
-        answer_text = await self.openai_adapter.generate_chat_completion(
+        answer_text = await self.chat_adapter.generate_chat_completion(
             messages=messages,
             model=self.chat_model,
             temperature=0.3,

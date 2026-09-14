@@ -1,11 +1,20 @@
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from openai import AsyncOpenAI
 
 
 class OpenAIAdapter:
-    def __init__(self, api_key: str):
-        self.client = AsyncOpenAI(api_key=api_key)
+    """Cliente para qualquer API compatível com o formato OpenAI.
+
+    `base_url` permite apontar este mesmo adaptador para outros provedores
+    compatíveis (ex.: DeepSeek em `https://api.deepseek.com`), mantendo a
+    interface (`generate_embeddings`/`generate_chat_completion`) idêntica
+    para a camada de aplicação. Quando omitido, usa o endpoint padrão da
+    OpenAI.
+    """
+
+    def __init__(self, api_key: str, base_url: Optional[str] = None):
+        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
 
     async def generate_embeddings(
         self, texts: List[str], model: str = "text-embedding-3-small"
