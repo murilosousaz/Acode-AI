@@ -24,6 +24,7 @@ class AnswerStudentQuestionUseCase:
         chat_adapter: OpenAIAdapter,
         chat_model: str = "gpt-4o-mini",
         embedding_model: str = "text-embedding-3-small",
+        embedding_dimensions: int | None = None,
         top_k: int = 4,
     ):
         self.doc_repo = doc_repo
@@ -36,6 +37,10 @@ class AnswerStudentQuestionUseCase:
         self.chat_adapter = chat_adapter
         self.chat_model = chat_model
         self.embedding_model = embedding_model
+        # Tem que ser igual ao usado na ingestão — senão o vetor da
+        # pergunta não tem a mesma dimensão dos chunks já gravados e a
+        # busca no índice vetorial falha ou fica sem sentido.
+        self.embedding_dimensions = embedding_dimensions
         self.top_k = top_k
 
     async def execute(self, query: QueryDTO) -> str:
@@ -44,7 +49,7 @@ class AnswerStudentQuestionUseCase:
 
         # 2. Gera embedding e busca chunks relevantes no MongoDB
         query_vectors = await self.embedding_adapter.generate_embeddings(
-            [query.question], model=self.embedding_model
+            [query.question], model=self.embedding_model, dimensions=self.embedding_dimensions
         )
         relevant_chunks = await self.doc_repo.search_similar_chunks(
             query_vector=query_vectors[0],

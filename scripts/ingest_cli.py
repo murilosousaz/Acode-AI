@@ -38,7 +38,10 @@ async def main():
     )
 
     use_case = IngestEducationalMaterialUseCase(
-        doc_repo, embedding_adapter, embedding_model=settings.GOOGLE_EMBEDDING_MODEL
+        doc_repo,
+        embedding_adapter,
+        embedding_model=settings.GOOGLE_EMBEDDING_MODEL,
+        embedding_dimensions=settings.EMBEDDING_DIMENSIONS,
     )
 
     print(f"🚀 Iniciando ingestão do PDF: {pdf_path} (Matéria: {subject})...")

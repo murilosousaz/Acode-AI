@@ -23,7 +23,10 @@ async def main():
         api_key=settings.GOOGLE_API_KEY, base_url=settings.GOOGLE_EMBEDDING_BASE_URL
     )
     use_case = IngestEducationalMaterialUseCase(
-        doc_repo, embedding_adapter, embedding_model=settings.GOOGLE_EMBEDDING_MODEL
+        doc_repo,
+        embedding_adapter,
+        embedding_model=settings.GOOGLE_EMBEDDING_MODEL,
+        embedding_dimensions=settings.EMBEDDING_DIMENSIONS,
     )
 
     pdf_files = list(RAW_PDFS_DIR.glob("*.pdf"))

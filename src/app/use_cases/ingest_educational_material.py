@@ -18,6 +18,7 @@ class IngestEducationalMaterialUseCase:
         doc_repo: DocumentRepository,
         embedding_adapter: OpenAIAdapter,
         embedding_model: str = "text-embedding-3-small",
+        embedding_dimensions: int | None = None,
         chunk_size: int = 800,
         chunk_overlap: int = 150,
     ):
@@ -27,6 +28,10 @@ class IngestEducationalMaterialUseCase:
         # embeddings (OpenAI).
         self.embedding_adapter = embedding_adapter
         self.embedding_model = embedding_model
+        # Repassado como `dimensions` na chamada de embeddings — necessário
+        # com `gemini-embedding-001` (nativamente 3072-d) para bater com a
+        # dimensão do índice vetorial já criado no MongoDB.
+        self.embedding_dimensions = embedding_dimensions
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
@@ -50,7 +55,7 @@ class IngestEducationalMaterialUseCase:
 
         # 3. Geração de embeddings
         embeddings = await self.embedding_adapter.generate_embeddings(
-            text_chunks, model=self.embedding_model
+            text_chunks, model=self.embedding_model, dimensions=self.embedding_dimensions
         )
 
         # 4. Construção das entidades de domínio

@@ -1,6 +1,12 @@
 from typing import Optional
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Campos que não podem ficar em branco no .env, mesmo sendo `str` (o
+# Pydantic aceita "" como string válida, então sem essa checagem o erro só
+# aparece depois, de forma confusa, dentro do SDK que consome a chave).
+_REQUIRED_NON_EMPTY = ("DISCORD_BOT_TOKEN", "MONGO_URI", "GOOGLE_API_KEY", "DEEPSEEK_API_KEY")
 
 
 class Settings(BaseSettings):
@@ -13,7 +19,7 @@ class Settings(BaseSettings):
     # outro base_url — igual fazemos com o DeepSeek para o chat.
     GOOGLE_API_KEY: str
     GOOGLE_EMBEDDING_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
-    GOOGLE_EMBEDDING_MODEL: str = "text-embedding-004"
+    GOOGLE_EMBEDDING_MODEL: str = "gemini-embedding-001"
     # Usadas apenas pelo docker-compose.yml para subir o container do
     # MongoDB local (lidas diretamente do shell/`.env` pelo Compose, não
     # pelo código Python). Ficam aqui como opcionais só para não quebrar a
@@ -30,8 +36,9 @@ class Settings(BaseSettings):
     # deepseek-v4-flash = mais rápido/barato, qualidade um pouco menor.
     DEEPSEEK_CHAT_MODEL: str = "deepseek-v4-pro"
 
-    # text-embedding-004 do Google gera vetores de 768 dimensões (o da
-    # OpenAI usado antes gerava 1536) — precisa bater com o índice vetorial
+    # gemini-embedding-001 sai nativamente com 3072 dimensões, mas suporta
+    # truncar via Matryoshka (parâmetro `dimensions` na chamada) — usamos
+    # 768 pra manter compatibilidade com o índice vetorial já existente,
     # criado em scripts/create_vector_index.py.
     EMBEDDING_DIMENSIONS: int = 768
 
@@ -40,6 +47,16 @@ class Settings(BaseSettings):
     RATE_LIMIT_WINDOW_SECONDS: int = 60
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+
+    @field_validator(*_REQUIRED_NON_EMPTY)
+    @classmethod
+    def _not_blank(cls, value: str, info) -> str:
+        if not value or not value.strip():
+            raise ValueError(
+                f"'{info.field_name}' está vazio no .env — preencha com um valor real "
+                f"(veja .env.example) antes de rodar o projeto."
+            )
+        return value
 
 
 settings = Settings()
