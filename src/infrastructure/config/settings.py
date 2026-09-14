@@ -1,11 +1,20 @@
+from typing import Optional
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     DISCORD_BOT_TOKEN: str
     MONGO_URI: str
-    MONGO_DB_NAME: str = "vestibot"
+    MONGO_DB_NAME: str = "acode-ai"
     OPENAI_API_KEY: str
+    # Usadas apenas pelo docker-compose.yml para subir o container do
+    # MongoDB local (lidas diretamente do shell/`.env` pelo Compose, não
+    # pelo código Python). Ficam aqui como opcionais só para não quebrar a
+    # inicialização do bot quando ele roda contra um Atlas remoto, sem
+    # subir o container local.
+    MONGO_ROOT_USERNAME: Optional[str] = None
+    MONGO_ROOT_PASSWORD: Optional[str] = None
 
     OPENAI_CHAT_MODEL: str = "gpt-4o-mini"
     OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
