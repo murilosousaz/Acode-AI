@@ -90,16 +90,53 @@ class OpenAIAdapter:
         messages: List[Dict[str, str]],
         model: str = "gpt-4o-mini",
         temperature: float = 0.3,
+        max_tokens: Optional[int] = None,
     ) -> str:
         """Gera uma resposta de chat a partir de uma lista de mensagens.
 
         Mantém o cliente da OpenAI encapsulado neste adaptador, para que a
         camada de aplicação (use cases) não precise conhecer detalhes da
         API da OpenAI (ex.: `response.choices[0].message.content`).
+
+        `max_tokens` é importante para modelos em modo "thinking" (ex.:
+        deepseek-reasoner/deepseek-v4-pro): sem um limite explícito, o
+        provedor pode usar um default baixo e cortar a resposta no meio.
+        Passamos um valor generoso (configurável) para garantir respostas
+        completas.
         """
-        response = await self.client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-        )
-        return response.choices[0].message.content.strip()
+        kwargs = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+        }
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+
+        response = await self.client.chat.completions.create(**kwargs)
+
+        message = response.choices[0].message
+        content = getattr(message, "content", None)
+
+        # Modelos "thinking" separam o raciocínio (reasoning_content) da
+        # resposta final (content). Se o modelo for interrompido no meio do
+        # raciocínio (ex.: limite de tokens baixo), o `content` pode vir
+        # vazio/None — nesse caso devolver string vazia corromperia o
+        # histórico e a resposta do bot. Usamos o raciocínio como fallback
+        # e logamos um aviso, em vez de falhar ou devolver resposta vazia.
+        if content is None or not content.strip():
+            reasoning = getattr(message, "reasoning_content", None)
+            if reasoning and reasoning.strip():
+                logger.warning(
+                    "Modelo devolveu resposta final vazia (content=%r); "
+                    "usando reasoning_content como fallback. Considere "
+                    "aumentar max_tokens.",
+                    content,
+                )
+                return reasoning.strip()
+            raise ValueError(
+                "O modelo devolveu uma resposta vazia (content e "
+                "reasoning_content vazios). Aumente max_tokens ou "
+                "verifique o modelo/API."
+            )
+
+        return content.strip()

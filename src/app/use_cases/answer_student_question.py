@@ -26,6 +26,7 @@ class AnswerStudentQuestionUseCase:
         embedding_model: str = "text-embedding-3-small",
         embedding_dimensions: int | None = None,
         top_k: int = 4,
+        max_tokens: int = 4096,
     ):
         self.doc_repo = doc_repo
         self.chat_repo = chat_repo
@@ -42,6 +43,11 @@ class AnswerStudentQuestionUseCase:
         # busca no índice vetorial falha ou fica sem sentido.
         self.embedding_dimensions = embedding_dimensions
         self.top_k = top_k
+        # Limite de tokens da resposta do chat. Modelos "thinking" gastam
+        # tokens com raciocínio antes da resposta final; um valor baixo
+        # corta a resposta pela metade. Por isso definimos um default
+        # generoso e deixamos configurável via .env.
+        self.max_tokens = max_tokens
 
     async def execute(self, query: QueryDTO) -> str:
         # 1. Recupera o histórico de conversas do aluno
@@ -72,6 +78,7 @@ class AnswerStudentQuestionUseCase:
             messages=messages,
             model=self.chat_model,
             temperature=0.3,
+            max_tokens=self.max_tokens,
         )
 
         # 5. Salva as mensagens no histórico

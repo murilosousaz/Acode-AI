@@ -69,6 +69,7 @@ async def main():
         chat_model=settings.DEEPSEEK_CHAT_MODEL,
         embedding_model=settings.GOOGLE_EMBEDDING_MODEL,
         embedding_dimensions=settings.EMBEDDING_DIMENSIONS,
+        max_tokens=settings.DEEPSEEK_MAX_TOKENS,
     )
     ingest_use_case = IngestEducationalMaterialUseCase(
         doc_repo,

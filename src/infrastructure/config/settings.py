@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     # deepseek-v4-pro = modo "thinking", melhor qualidade de resposta.
     # deepseek-v4-flash = mais rápido/barato, qualidade um pouco menor.
     DEEPSEEK_CHAT_MODEL: str = "deepseek-v4-pro"
+    # Limite de tokens da resposta do chat. O deepseek-v4-pro roda em modo
+    # "thinking" (raciocínio antes da resposta); um limite baixo corta a
+    # resposta pela metade. 4096 tokens é folgado para uma resposta didática
+    # completa sem encarecer demais cada chamada.
+    DEEPSEEK_MAX_TOKENS: int = 4096
 
     # gemini-embedding-001 sai nativamente com 3072 dimensões, mas suporta
     # truncar via Matryoshka (parâmetro `dimensions` na chamada) — usamos

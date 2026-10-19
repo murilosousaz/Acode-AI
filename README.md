@@ -100,6 +100,7 @@ Isso sobe o MongoDB e o bot juntos, lendo as variáveis do `.env`.
 | `OPENAI_API_KEY`             | ✅          | Chave de API da OpenAI                                      |
 | `OPENAI_CHAT_MODEL`          |             | Modelo de chat (padrão: `gpt-4o-mini`)                      |
 | `OPENAI_EMBEDDING_MODEL`     |             | Modelo de embeddings (padrão: `text-embedding-3-small`)     |
+| `DEEPSEEK_MAX_TOKENS`        |             | Limite de tokens da resposta do chat (padrão: `4096`)       |
 | `EMBEDDING_DIMENSIONS`       |             | Dimensão do vetor de embedding, deve bater com o modelo acima (padrão: `1536`) |
 | `RATE_LIMIT_REQUESTS`        |             | Máx. de perguntas por usuário na janela (padrão: 5)         |
 | `RATE_LIMIT_WINDOW_SECONDS`  |             | Duração da janela de rate limit em segundos (padrão: 60)    |
@@ -125,6 +126,13 @@ Isso sobe o MongoDB e o bot juntos, lendo as variáveis do `.env`.
   embeddings fora do MongoDB, um comando `/perfil`).
 
 ## Correções aplicadas nesta revisão
+
+- Respostas do chat cortadas pela metade: o modelo `deepseek-v4-pro` roda
+  em modo "thinking" e o código não definia `max_tokens`, então o provedor
+  podia usar um limite baixo e interromper a resposta. Agora o limite é
+  explícito e configurável (`DEEPSEEK_MAX_TOKENS`, padrão `4096`), e o
+  adaptador trata `content` vazio (comum em modelos thinking) com fallback
+  para `reasoning_content` em vez de quebrar ou devolver resposta vazia.
 
 - Corrigida a incompatibilidade de versão do Python entre `pyproject.toml`
   (exigia `>=3.14`), `.python-version` (`3.14`) e o `Dockerfile`
