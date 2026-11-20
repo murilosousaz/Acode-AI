@@ -16,15 +16,66 @@ services:
       timeout: 5s
       retries: 5
 
-  bot:
-    build: .
-    container_name: acodeai-bot
+  ollama:
+    image: ollama/ollama:latest
+    container_name: acodeai-ollama
     restart: unless-stopped
+    ports:
+      - "11434:11434"
+    environment:
+      # O endpoint /v1 (OpenAI-compatível) não permite definir o contexto por
+      # requisição; sem isso o Ollama usa um contexto curto e pode truncar
+      # silenciosamente o prompt do RAG (chunks + histórico).
+      OLLAMA_CONTEXT_LENGTH: 8192
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # Para usar GPU NVIDIA, descomente:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # Baixa os modelos uma vez (ficam salvos no volume ollama_data) e encerra.
+  ollama-pull:
+    image: ollama/ollama:latest
+    container_name: acodeai-ollama-pull
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - ollama pull ${OLLAMA_CHAT_MODEL:-qwen2.5:7b} && ollama pull ${OLLAMA_EMBEDDING_MODEL:-nomic-embed-text}
+    restart: "no"
+
+  api:
+    build: .
+    container_name: acodeai-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
     depends_on:
       mongodb:
         condition: service_healthy
+      ollama-pull:
+        condition: service_completed_successfully
     env_file:
       - .env
+    environment:
+      # Sobrescrevem os "localhost" do .env: dentro do compose, Mongo e Ollama
+      # são outros containers.
+      MONGO_URI: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD}@mongodb:27017/?authSource=admin&directConnection=true
+      OLLAMA_BASE_URL: http://ollama:11434/v1
 
 volumes:
   mongo_data:
+  ollama_data:

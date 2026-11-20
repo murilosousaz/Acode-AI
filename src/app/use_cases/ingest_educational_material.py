@@ -1,13 +1,14 @@
+import asyncio
 import logging
 import os
-from typing import List
+from typing import List, Optional
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from src.domain.entities.document import DocumentChunk
+from src.domain.ports import EmbeddingGenerator
 from src.domain.repositories.document_repository import DocumentRepository
 from src.infrastructure.adapters.pymupdf_adapter import PyMuPDFAdapter
-from src.infrastructure.adapters.openai_adapter import OpenAIAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -16,50 +17,50 @@ class IngestEducationalMaterialUseCase:
     def __init__(
         self,
         doc_repo: DocumentRepository,
-        embedding_adapter: OpenAIAdapter,
-        embedding_model: str = "text-embedding-3-small",
-        embedding_dimensions: int | None = None,
+        embedding_generator: EmbeddingGenerator,
         chunk_size: int = 800,
         chunk_overlap: int = 150,
     ):
         self.doc_repo = doc_repo
-        # Ingestão só gera embeddings (não chama chat), então precisa de um
-        # único adaptador — o que estiver configurado como provedor de
-        # embeddings (OpenAI).
-        self.embedding_adapter = embedding_adapter
-        self.embedding_model = embedding_model
-        # Repassado como `dimensions` na chamada de embeddings — necessário
-        # com `gemini-embedding-001` (nativamente 3072-d) para bater com a
-        # dimensão do índice vetorial já criado no MongoDB.
-        self.embedding_dimensions = embedding_dimensions
+        self.embedding_generator = embedding_generator
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
             separators=["\n\n", "\n", ". ", " ", ""],
         )
 
-    async def execute(self, pdf_path: str, subject: str, title: str) -> int:
+    def _extract_and_split(self, pdf_path: str) -> List[str]:
+        # Trabalho de CPU (PyMuPDF + splitter): roda em thread separada para
+        # não travar o event loop da API enquanto processa um PDF grande.
+        raw_text = PyMuPDFAdapter.extract_text_from_pdf(pdf_path)
+        if not raw_text.strip():
+            return []
+        return self.text_splitter.split_text(raw_text)
+
+    async def execute(
+        self,
+        pdf_path: str,
+        subject: str,
+        title: str,
+        source_name: Optional[str] = None,
+    ) -> int:
+        """Ingere um PDF e devolve a quantidade de chunks gravados.
+
+        `source_name` é o nome original do arquivo (em uploads, `pdf_path` é
+        um arquivo temporário sem significado); por padrão usa o basename.
+        """
         if not os.path.exists(pdf_path):
             raise FileNotFoundError(f"Arquivo não encontrado: {pdf_path}")
 
-        # 1. Extração de texto via PyMuPDF
-        raw_text = PyMuPDFAdapter.extract_text_from_pdf(pdf_path)
-        if not raw_text.strip():
-            logger.warning("PDF '%s' não retornou texto extraível (pode ser digitalizado/imagem).", pdf_path)
-            return 0
-
-        # 2. Divisão em chunks
-        text_chunks = self.text_splitter.split_text(raw_text)
+        text_chunks = await asyncio.to_thread(self._extract_and_split, pdf_path)
         if not text_chunks:
+            logger.warning("PDF '%s' não retornou texto extraível (pode ser digitalizado/imagem).", title)
             return 0
 
-        # 3. Geração de embeddings
-        embeddings = await self.embedding_adapter.generate_embeddings(
-            text_chunks, model=self.embedding_model, dimensions=self.embedding_dimensions
-        )
+        embeddings = await self.embedding_generator.generate_embeddings(text_chunks)
 
-        # 4. Construção das entidades de domínio
-        documents_to_insert: List[DocumentChunk] = [
+        source = source_name or os.path.basename(pdf_path)
+        documents: List[DocumentChunk] = [
             DocumentChunk(
                 content=chunk,
                 embedding=vector,
@@ -67,12 +68,11 @@ class IngestEducationalMaterialUseCase:
                     "title": title,
                     "subject": subject,
                     "chunk_index": i,
-                    "source_path": pdf_path,
+                    "source_file": source,
                 },
             )
             for i, (chunk, vector) in enumerate(zip(text_chunks, embeddings))
         ]
 
-        # 5. Persistência no banco
-        inserted_ids = await self.doc_repo.save_chunks(documents_to_insert)
+        inserted_ids = await self.doc_repo.save_chunks(documents)
         return len(inserted_ids)

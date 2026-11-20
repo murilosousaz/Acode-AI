@@ -1,11 +1,13 @@
 import logging
+from typing import List
 
-from src.app.dtos.query_dto import QueryDTO
+from src.app.dtos.chat_dto import AnswerDTO, QuestionInput, SourceDTO
 from src.domain.entities.chat_session import Message
-from src.domain.repositories.document_repository import DocumentRepository
+from src.domain.entities.document import DocumentChunk
+from src.domain.ports import ChatCompleter, EmbeddingGenerator
 from src.domain.repositories.chat_repository import ChatRepository
+from src.domain.repositories.document_repository import DocumentRepository
 from src.domain.service.prompt_builder_service import PromptBuilderService
-from src.infrastructure.adapters.openai_adapter import OpenAIAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -14,49 +16,31 @@ NO_CONTEXT_MESSAGE = (
     "estudos. Tente especificar a matéria ou reformular a pergunta."
 )
 
+PROMPT_HISTORY_LIMIT = 10
+EXCERPT_MAX_CHARS = 240
+
 
 class AnswerStudentQuestionUseCase:
     def __init__(
         self,
         doc_repo: DocumentRepository,
         chat_repo: ChatRepository,
-        embedding_adapter: OpenAIAdapter,
-        chat_adapter: OpenAIAdapter,
-        chat_model: str = "gpt-4o-mini",
-        embedding_model: str = "text-embedding-3-small",
-        embedding_dimensions: int | None = None,
+        embedding_generator: EmbeddingGenerator,
+        chat_completer: ChatCompleter,
         top_k: int = 4,
-        max_tokens: int = 4096,
     ):
         self.doc_repo = doc_repo
         self.chat_repo = chat_repo
-        # Dois adaptadores porque o provedor de embeddings (OpenAI) e o de
-        # chat (ex.: DeepSeek) podem ser diferentes. Ambos implementam a
-        # mesma interface (OpenAIAdapter), então cada um só é usado para o
-        # método correspondente.
-        self.embedding_adapter = embedding_adapter
-        self.chat_adapter = chat_adapter
-        self.chat_model = chat_model
-        self.embedding_model = embedding_model
-        # Tem que ser igual ao usado na ingestão — senão o vetor da
-        # pergunta não tem a mesma dimensão dos chunks já gravados e a
-        # busca no índice vetorial falha ou fica sem sentido.
-        self.embedding_dimensions = embedding_dimensions
+        self.embedding_generator = embedding_generator
+        self.chat_completer = chat_completer
         self.top_k = top_k
-        # Limite de tokens da resposta do chat. Modelos "thinking" gastam
-        # tokens com raciocínio antes da resposta final; um valor baixo
-        # corta a resposta pela metade. Por isso definimos um default
-        # generoso e deixamos configurável via .env.
-        self.max_tokens = max_tokens
 
-    async def execute(self, query: QueryDTO) -> str:
-        # 1. Recupera o histórico de conversas do aluno
-        session = await self.chat_repo.get_session(query.user_id)
+    async def execute(self, query: QuestionInput) -> AnswerDTO:
+        # 1. Histórico recente da conversa
+        session = await self.chat_repo.get_session(query.session_id, limit=PROMPT_HISTORY_LIMIT)
 
-        # 2. Gera embedding e busca chunks relevantes no MongoDB
-        query_vectors = await self.embedding_adapter.generate_embeddings(
-            [query.question], model=self.embedding_model, dimensions=self.embedding_dimensions
-        )
+        # 2. Embedding da pergunta + busca vetorial dos chunks relevantes
+        query_vectors = await self.embedding_generator.generate_embeddings([query.question])
         relevant_chunks = await self.doc_repo.search_similar_chunks(
             query_vector=query_vectors[0],
             top_k=self.top_k,
@@ -64,25 +48,39 @@ class AnswerStudentQuestionUseCase:
         )
 
         if not relevant_chunks:
-            return NO_CONTEXT_MESSAGE
+            return AnswerDTO(session_id=query.session_id, answer=NO_CONTEXT_MESSAGE, sources=[])
 
-        # 3. Monta o contexto e as mensagens (regra de domínio isolada no
-        # PromptBuilderService, fora da camada de aplicação).
+        # 3. Prompt (regra de domínio isolada no PromptBuilderService)
         context_text = PromptBuilderService.build_context(relevant_chunks)
-        history = [{"role": msg.role, "content": msg.content} for msg in session.messages]
+        history = [{"role": m.role, "content": m.content} for m in session.messages]
         messages = PromptBuilderService.build_messages(history, context_text, query.question)
 
-        # 4. Chama o modelo de chat (encapsulado no adaptador, sem expor
-        # detalhes do cliente da OpenAI à camada de aplicação)
-        answer_text = await self.chat_adapter.generate_chat_completion(
-            messages=messages,
-            model=self.chat_model,
-            temperature=0.3,
-            max_tokens=self.max_tokens,
+        # 4. Resposta do modelo de chat
+        answer_text = await self.chat_completer.generate_chat_completion(messages, temperature=0.3)
+
+        # 5. Persiste a troca (pergunta + resposta) de uma vez só
+        await self.chat_repo.add_messages(
+            query.session_id,
+            [
+                Message(role="user", content=query.question),
+                Message(role="assistant", content=answer_text),
+            ],
         )
 
-        # 5. Salva as mensagens no histórico
-        await self.chat_repo.add_message(query.user_id, Message(role="user", content=query.question))
-        await self.chat_repo.add_message(query.user_id, Message(role="assistant", content=answer_text))
+        return AnswerDTO(
+            session_id=query.session_id,
+            answer=answer_text,
+            sources=[self._to_source(c) for c in relevant_chunks],
+        )
 
-        return answer_text
+    @staticmethod
+    def _to_source(chunk: DocumentChunk) -> SourceDTO:
+        excerpt = " ".join(chunk.content.split())
+        if len(excerpt) > EXCERPT_MAX_CHARS:
+            excerpt = excerpt[: EXCERPT_MAX_CHARS - 1].rstrip() + "…"
+        return SourceDTO(
+            title=chunk.metadata.get("title", "Material"),
+            subject=chunk.metadata.get("subject", "Geral"),
+            excerpt=excerpt,
+            score=chunk.metadata.get("score"),
+        )

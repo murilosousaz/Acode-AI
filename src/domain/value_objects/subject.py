@@ -12,12 +12,12 @@ def _normalize(value: str) -> str:
 
 class Subject(str, Enum):
     """Matérias suportadas pelo tutor, usadas tanto na ingestão de PDFs
-    quanto no filtro de busca do comando `/duvida`.
+    quanto no filtro de busca do chat.
 
     Usar sempre este enum (via `from_string`) como fonte única de verdade
     para o valor de `metadata.subject` gravado no MongoDB garante que a
-    ingestão (que recebe texto livre do admin ou do nome do arquivo) e a
-    busca (que oferece um combobox fixo no Discord) fiquem consistentes.
+    ingestão (que recebe texto livre do nome do arquivo ou da CLI) e a
+    busca (que a API restringe aos valores deste enum) fiquem consistentes.
     Sem essa normalização, um material ingerido como "física" nunca seria
     encontrado ao filtrar por "Fisica".
     """
@@ -33,7 +33,7 @@ class Subject(str, Enum):
 
     @property
     def label(self) -> str:
-        """Rótulo amigável em português para exibição na UI do Discord."""
+        """Rótulo amigável em português para exibição no frontend."""
         return {
             Subject.HISTORIA: "História",
             Subject.GEOGRAFIA: "Geografia",

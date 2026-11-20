@@ -1,86 +1,132 @@
 # AcodeAI
 
-Bot de estudos para Discord que responde dúvidas de vestibular (ENEM, FUVEST
-etc.) usando RAG (Retrieval-Augmented Generation): materiais em PDF são
-indexados como embeddings no MongoDB Atlas Vector Search e usados como
-contexto para respostas geradas pela OpenAI.
+API REST de um tutor para vestibular (ENEM, FUVEST etc.) que usa RAG
+(Retrieval-Augmented Generation): materiais em PDF são indexados como
+embeddings no MongoDB Atlas Vector Search e usados como contexto para
+respostas geradas por modelos gratuitos rodando localmente via
+[Ollama](https://ollama.com). Feita para ser consumida por um frontend.
 
 ## Arquitetura
 
-O projeto segue princípios de DDD, dividido em camadas:
+DDD em camadas; as dependências apontam sempre para dentro:
 
 ```
 src/
-├── domain/          # Entidades, value objects, contratos de repositório e
-│                     # regras de negócio puras (não dependem de infra).
-├── app/              # Casos de uso que orquestram o domínio.
-├── infrastructure/    # Implementações concretas: OpenAI, MongoDB, PyMuPDF,
-│                     # rate limiter, configurações.
-└── presentation/      # Adaptador de entrada: bot e comandos do Discord.
+├── domain/          # Entidades, value objects, portas (EmbeddingGenerator,
+│                    # ChatCompleter), contratos de repositório e regras puras.
+├── app/             # Casos de uso e DTOs (responder dúvida, ingerir PDF,
+│                    # histórico de conversa). Dependem só do domínio.
+├── infrastructure/  # Ollama, MongoDB, PyMuPDF, rate limiter, settings.
+├── bootstrap.py     # Raiz de composição: monta o Container de dependências.
+└── presentation/
+    └── api/         # FastAPI: routers, schemas, dependências, tratamento de erros.
 ```
 
-## Funcionalidades
+## Endpoints
 
-- `/duvida [pergunta] [materia]` — pergunta ao tutor, com histórico de
-  conversa por usuário e filtro opcional por matéria.
-- `/limpar_historico` — reseta o histórico de conversa do usuário.
-- `/ingest_pdf` (admin) — envia um PDF pelo Discord para ser indexado.
-- `scripts/ingest_cli.py` e `scripts/ingest_bulks_pdf.py` — ingestão de PDFs
-  via linha de comando (individual ou em lote a partir de `data/raw_pdfs/`).
+Documentação interativa (Swagger) em `http://localhost:8000/docs`; o
+OpenAPI em `/openapi.json` serve para gerar um client tipado no frontend.
+
+| Método | Rota                              | Descrição                                           |
+|--------|-----------------------------------|-----------------------------------------------------|
+| POST   | `/api/v1/chat/messages`           | Envia uma dúvida e recebe a resposta + fontes        |
+| GET    | `/api/v1/chat/sessions/{id}`      | Histórico da conversa                                |
+| DELETE | `/api/v1/chat/sessions/{id}`      | Apaga o histórico da conversa (204)                  |
+| GET    | `/api/v1/subjects`                | Matérias válidas para o filtro (`value` + `label`)   |
+| POST   | `/api/v1/documents`               | **Admin** — envia um PDF para indexação              |
+| GET    | `/health`                         | Liveness                                             |
+| GET    | `/health/ready`                   | Readiness (MongoDB e Ollama)                         |
+
+### Chat
+
+```bash
+curl -X POST http://localhost:8000/api/v1/chat/messages \
+  -H "Content-Type: application/json" \
+  -d '{"question": "O que é velocidade média?", "subject": "Fisica"}'
+```
+
+```json
+{
+  "session_id": "8f1c2e1e-3b0e-4a43-9d35-0c1f0f8f2a77",
+  "answer": "A **velocidade média** é a razão entre ...",
+  "sources": [
+    {"title": "Cinemática - Cap. 1", "subject": "Fisica", "score": 0.91, "excerpt": "..."}
+  ]
+}
+```
+
+- `session_id` é opcional na primeira pergunta; a API cria um e devolve. O
+  frontend deve guardá-lo (ex.: `localStorage`) e reenviá-lo nas perguntas
+  seguintes para manter o histórico.
+- `subject` é opcional e deve ser um `value` de `GET /subjects`.
+- `question`: 1 a 2000 caracteres.
+- Limite de perguntas por IP (padrão 5/min): excedido → `429` com header
+  `Retry-After`.
+- Se o Ollama estiver fora do ar ou sem o modelo → `503`.
+- Quando nenhum trecho relevante é encontrado, `answer` traz uma mensagem
+  padrão, `sources` vem vazio e a troca não entra no histórico.
+
+### Upload de PDF (admin)
+
+```bash
+curl -X POST http://localhost:8000/api/v1/documents \
+  -H "X-API-Key: $ADMIN_API_KEY" \
+  -F "file=@Fisica_Cinematica.pdf" -F "subject=Fisica" -F "title=Cinemática - Cap. 1"
+```
+
+Respostas: `201` (`chunks_created`), `401` chave errada/ausente, `503` se
+`ADMIN_API_KEY` não estiver configurada, `413` arquivo grande demais, `415`
+não é PDF, `422` matéria inválida ou PDF sem texto extraível. A requisição só
+responde ao fim da vetorização, que pode levar de segundos a minutos para PDFs
+grandes — use um timeout generoso no frontend e **não exponha a chave admin
+no código do navegador** (use um painel admin protegido ou chame por backend).
+
+### Exemplo de consumo no frontend
+
+```ts
+const API = "http://localhost:8000/api/v1";
+
+export async function ask(question: string, subject?: string) {
+  const sessionId = localStorage.getItem("acodeai:session") ?? undefined;
+  const res = await fetch(`${API}/chat/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question, subject, session_id: sessionId }),
+  });
+  if (res.status === 429) throw new Error(`Aguarde ${res.headers.get("Retry-After")}s`);
+  if (!res.ok) throw new Error((await res.json()).detail ?? "Erro");
+  const data = await res.json();
+  localStorage.setItem("acodeai:session", data.session_id);
+  return data; // { session_id, answer, sources }
+}
+```
+
+Erros seguem o formato `{"detail": "..."}` (em erros de validação, `detail` é
+uma lista no padrão do FastAPI).
 
 ## Pré-requisitos
 
 - Python 3.13 e [uv](https://docs.astral.sh/uv/)
-- Uma instância do MongoDB com suporte a Atlas Vector Search (o
-  `docker-compose.yml` já sobe `mongodb-atlas-local` para desenvolvimento)
-- Uma chave de API da OpenAI
-- Um bot criado no [Discord Developer Portal](https://discord.com/developers/applications)
-  com o intent `MESSAGE CONTENT` habilitado
+- [Ollama](https://ollama.com) (ou use o serviço `ollama` do `docker-compose.yml`)
+- MongoDB com Atlas Vector Search (o `docker-compose.yml` sobe `mongodb-atlas-local`)
 
-## Configuração
+## Rodando localmente
 
-1. Copie `.env.example` para `.env` e preencha as variáveis:
+```bash
+cp .env.example .env                 # ajuste ADMIN_API_KEY e CORS_ALLOW_ORIGINS
+uv sync
 
-   ```bash
-   cp .env.example .env
-   ```
+ollama pull qwen2.5:7b               # chat
+ollama pull nomic-embed-text         # embeddings (768 dimensões)
+docker compose up -d mongodb
 
-2. Instale as dependências:
+uv run python -m scripts.create_vector_index    # uma vez, antes da 1ª ingestão
+uv run python -m scripts.ingest_cli caminho/arquivo.pdf Fisica "Cinemática - Cap. 1"
+# ou em lote: PDFs em data/raw_pdfs/ nomeados Materia_Descricao.pdf
+uv run python -m scripts.ingest_bulks_pdf
 
-   ```bash
-   uv sync
-   ```
-
-3. Suba o MongoDB local (ou aponte `MONGO_URI` para um cluster Atlas real):
-
-   ```bash
-   docker compose up -d mongodb
-   ```
-
-4. Crie o índice de busca vetorial (necessário antes da primeira ingestão):
-
-   ```bash
-   uv run python -m scripts.create_vector_index
-   ```
-
-5. Ingira algum material de estudo:
-
-   ```bash
-   uv run python -m scripts.ingest_cli caminho/para/arquivo.pdf Fisica "Cinemática - Cap. 1"
-   ```
-
-   Ou, para ingestão em lote, coloque os PDFs em `data/raw_pdfs/` (nomeados
-   como `Materia_Descricao.pdf`) e rode:
-
-   ```bash
-   uv run python -m scripts.ingest_bulks_pdf
-   ```
-
-6. Rode o bot:
-
-   ```bash
-   uv run python -m src.presentation.discord.main
-   ```
+uv run uvicorn src.presentation.api.main:app --reload
+```
 
 ## Rodando com Docker
 
@@ -88,82 +134,69 @@ src/
 docker compose up -d --build
 ```
 
-Isso sobe o MongoDB e o bot juntos, lendo as variáveis do `.env`.
+Sobe MongoDB, Ollama (baixa os modelos na primeira vez) e a API em
+`http://localhost:8000`. Dentro do compose a API usa os hosts `mongodb` e
+`ollama` automaticamente, sobrescrevendo os `localhost` do `.env`. O Ollama
+roda com `OLLAMA_CONTEXT_LENGTH=8192`; rodando o Ollama fora do Docker, suba-o
+com `OLLAMA_CONTEXT_LENGTH=8192 ollama serve`, senão o prompt do RAG pode ser
+truncado silenciosamente.
+
+Atrás de um proxy reverso, mantenha `--proxy-headers` (já no Dockerfile) para
+o rate limit enxergar o IP real do cliente.
 
 ## Variáveis de ambiente
 
-| Variável                     | Obrigatória | Descrição                                                |
-|------------------------------|:-----------:|-----------------------------------------------------------|
-| `DISCORD_BOT_TOKEN`          | ✅          | Token do bot no Discord Developer Portal                  |
-| `MONGO_URI`                  | ✅          | String de conexão do MongoDB                               |
-| `MONGO_DB_NAME`              |             | Nome do banco (padrão: `vestibot`)                         |
-| `OPENAI_API_KEY`             | ✅          | Chave de API da OpenAI                                      |
-| `OPENAI_CHAT_MODEL`          |             | Modelo de chat (padrão: `gpt-4o-mini`)                      |
-| `OPENAI_EMBEDDING_MODEL`     |             | Modelo de embeddings (padrão: `text-embedding-3-small`)     |
-| `DEEPSEEK_MAX_TOKENS`        |             | Limite de tokens da resposta do chat (padrão: `4096`)       |
-| `EMBEDDING_DIMENSIONS`       |             | Dimensão do vetor de embedding, deve bater com o modelo acima (padrão: `1536`) |
-| `RATE_LIMIT_REQUESTS`        |             | Máx. de perguntas por usuário na janela (padrão: 5)         |
-| `RATE_LIMIT_WINDOW_SECONDS`  |             | Duração da janela de rate limit em segundos (padrão: 60)    |
-| `MONGO_ROOT_USERNAME`        |             | Usuário admin do container Mongo local (docker-compose)     |
-| `MONGO_ROOT_PASSWORD`        |             | Senha admin do container Mongo local (docker-compose)       |
+| Variável                    | Obrigatória | Descrição                                                          |
+|-----------------------------|:-----------:|--------------------------------------------------------------------|
+| `MONGO_URI`                 | ✅          | String de conexão do MongoDB                                        |
+| `MONGO_DB_NAME`             |             | Nome do banco (padrão: `acode-ai`)                                  |
+| `MONGO_ROOT_USERNAME` / `MONGO_ROOT_PASSWORD` | | Credenciais do Mongo local (docker-compose)               |
+| `ADMIN_API_KEY`             |             | Chave do header `X-API-Key` para upload de PDFs; vazia = desabilitado |
+| `CORS_ALLOW_ORIGINS`        |             | Origens do frontend, separadas por vírgula                          |
+| `MAX_UPLOAD_MB`             |             | Tamanho máximo do PDF (padrão: `25`)                                |
+| `OLLAMA_BASE_URL`           |             | Endpoint OpenAI-compatível (padrão: `http://localhost:11434/v1`)    |
+| `OLLAMA_CHAT_MODEL`         |             | Modelo de chat (padrão: `qwen2.5:7b`)                               |
+| `OLLAMA_EMBEDDING_MODEL`    |             | Modelo de embeddings (padrão: `nomic-embed-text`)                   |
+| `OLLAMA_MAX_TOKENS`         |             | Limite de tokens da resposta (padrão: `2048`)                       |
+| `OLLAMA_TIMEOUT_SECONDS`    |             | Timeout das chamadas ao Ollama (padrão: `180`)                      |
+| `EMBEDDING_DIMENSIONS`      |             | Dimensão do vetor; deve bater com o modelo e o índice (padrão: `768`) |
+| `RATE_LIMIT_REQUESTS`       |             | Máx. de perguntas por IP na janela (padrão: `5`)                    |
+| `RATE_LIMIT_WINDOW_SECONDS` |             | Janela do rate limit em segundos (padrão: `60`)                     |
+
+## Testes
+
+```bash
+uv run pytest
+```
+
+A suíte usa repositórios e IA falsos (não precisa de Mongo nem Ollama) e
+cobre os endpoints, validações, rate limit, autenticação admin, upload, CORS e
+o adaptador do Ollama (via transporte HTTP simulado).
+
+## Notas de migração
+
+- **Discord → API:** o bot, os cogs e o `DiscordFormatter` foram removidos. O
+  histórico agora é por `session_id` (UUID) em vez do ID de usuário do Discord;
+  sessões antigas (campo `user_id`) ficam órfãs na coleção `chat_sessions` e
+  podem ser apagadas.
+- **Gemini/DeepSeek → Ollama:** os vetores antigos são incompatíveis com o
+  `nomic-embed-text`, mesmo com 768 dimensões. Apague a coleção
+  `document_chunks` e reingira os PDFs. Se trocar de modelo de embeddings com
+  outra dimensão, ajuste `EMBEDDING_DIMENSIONS`, recrie o índice e reingira.
+- Metadado `source_path` dos chunks virou `source_file` (só o nome do arquivo,
+  sem caminho do servidor).
 
 ## Limitações conhecidas / próximos passos
 
-- O rate limiter é em memória por processo; em um deploy com múltiplas
-  réplicas, o controle deveria migrar para um armazenamento compartilhado
-  (Redis, por exemplo).
-- Não há suite de testes automatizados ainda.
-- `PyMuPDFAdapter` não faz OCR: PDFs digitalizados (imagem) não terão texto
-  extraído.
-- O driver `motor` está em modo de depreciação desde maio/2026 (fim do
-  suporte previsto para maio/2027). Recomenda-se migrar para a
-  [API assíncrona nativa do PyMongo](https://www.mongodb.com/docs/languages/python/pymongo-driver/current/reference/migration/)
-  (`pymongo`, já presente nas dependências) quando possível.
-- `Vector` (`src/domain/value_objects/vector.py`) e `Student`
-  (`src/domain/entities/student.py`) são peças de domínio já implementadas
-  e prontas para uso, mas ainda não consumidas por nenhum caso de uso —
-  ficam disponíveis para futuras funcionalidades (ex.: comparação de
-  embeddings fora do MongoDB, um comando `/perfil`).
-
-## Correções aplicadas nesta revisão
-
-- Respostas do chat cortadas pela metade: o modelo `deepseek-v4-pro` roda
-  em modo "thinking" e o código não definia `max_tokens`, então o provedor
-  podia usar um limite baixo e interromper a resposta. Agora o limite é
-  explícito e configurável (`DEEPSEEK_MAX_TOKENS`, padrão `4096`), e o
-  adaptador trata `content` vazio (comum em modelos thinking) com fallback
-  para `reasoning_content` em vez de quebrar ou devolver resposta vazia.
-
-- Corrigida a incompatibilidade de versão do Python entre `pyproject.toml`
-  (exigia `>=3.14`), `.python-version` (`3.14`) e o `Dockerfile`
-  (`python:3.13-slim`), que impediria o build da imagem Docker.
-- Adicionados os arquivos `__init__.py` que faltavam em praticamente todos
-  os subpacotes de `src/` e em `scripts/`.
-- `DiscordFormatter.split_message` não quebrava uma única linha/parágrafo
-  maior que o limite, podendo gerar uma mensagem maior que o permitido pelo
-  Discord (erro HTTP 400 ao responder `/duvida`).
-- A matéria informada na ingestão (`/ingest_pdf`, `ingest_cli.py`,
-  `ingest_bulks_pdf.py`) era um texto livre, enquanto a busca em `/duvida`
-  usa um combobox fixo (`Subject`) — um material ingerido como "física"
-  nunca seria encontrado ao filtrar por "Fisica". Agora a matéria é sempre
-  normalizada contra o enum `Subject` (`Subject.from_string`), tanto na
-  ingestão quanto na busca.
-- `scripts/ingest_cli.py` e `scripts/ingest_bulks_pdf.py` não repassavam
-  `OPENAI_EMBEDDING_MODEL` do `.env` para o caso de uso de ingestão, usando
-  sempre o valor padrão do código.
-- `scripts/create_vector_index.py` podia falhar ao tentar criar o índice
-  vetorial antes de existir qualquer documento na coleção; agora garante
-  que a coleção exista antes, usa a dimensão configurável
-  (`EMBEDDING_DIMENSIONS`) em vez de um valor fixo, e aguarda o índice
-  ficar pronto.
-- `AnswerStudentQuestionUseCase` chamava `openai_adapter.client` diretamente
-  (vazando um detalhe de infraestrutura para a camada de aplicação); a
-  chamada ao modelo de chat agora está encapsulada em
-  `OpenAIAdapter.generate_chat_completion`.
-- Implementados os arquivos de domínio que estavam vazios:
-  `src/app/dtos/query_dto.py` (agora usado por `AnswerStudentQuestionUseCase`
-  e `StudyCog`), `src/domain/value_objects/vector.py` e
-  `src/domain/entities/student.py`.
-- `AdminCog.ingest_pdf` agora aceita PDFs com extensão em maiúsculas
-  (`.PDF`) e usa um arquivo temporário mais robusto entre sistemas
-  operacionais.
+- Sem autenticação de usuários: o `session_id` (UUID não adivinhável) é a única
+  proteção de uma conversa. Para contas reais, adicione login/JWT e associe as
+  sessões ao usuário.
+- A resposta do chat não é transmitida em streaming; com modelos locais ela pode
+  levar dezenas de segundos. SSE em `/chat/messages/stream` é o próximo passo
+  natural para a UX do frontend.
+- O rate limiter é em memória por processo; com várias réplicas, migre para Redis.
+- `PyMuPDFAdapter` não faz OCR: PDFs digitalizados não geram texto.
+- O driver `motor` está depreciado (fim do suporte previsto para maio/2027);
+  migrar para a API assíncrona nativa do PyMongo.
+- O `nomic-embed-text` rende melhor com os prefixos `search_document: ` (ingestão)
+  e `search_query: ` (pergunta); ainda não aplicados.

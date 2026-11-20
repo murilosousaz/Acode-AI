@@ -7,9 +7,7 @@ from src.infrastructure.database.mongodb.connection import (
     close_mongo_connection,
     db_context
 )
-from src.infrastructure.database.mongodb.mongo_document_repo import MongoDocumentRepository
-from src.infrastructure.adapters.openai_adapter import OpenAIAdapter
-from src.app.use_cases.ingest_educational_material import IngestEducationalMaterialUseCase
+from src.bootstrap import build_container
 from src.domain.value_objects.subject import Subject
 
 RAW_PDFS_DIR = Path("data/raw_pdfs")
@@ -18,16 +16,8 @@ RAW_PDFS_DIR = Path("data/raw_pdfs")
 async def main():
     await connect_to_mongo()
 
-    doc_repo = MongoDocumentRepository(db_context.db)
-    embedding_adapter = OpenAIAdapter(
-        api_key=settings.GOOGLE_API_KEY, base_url=settings.GOOGLE_EMBEDDING_BASE_URL
-    )
-    use_case = IngestEducationalMaterialUseCase(
-        doc_repo,
-        embedding_adapter,
-        embedding_model=settings.GOOGLE_EMBEDDING_MODEL,
-        embedding_dimensions=settings.EMBEDDING_DIMENSIONS,
-    )
+    container = await build_container(settings, db_context.db)
+    use_case = container.ingest_material
 
     pdf_files = list(RAW_PDFS_DIR.glob("*.pdf"))
     if not pdf_files:
@@ -46,7 +36,7 @@ async def main():
 
         # Normaliza a matéria contra o enum Subject (ignora acentos/caixa e
         # cai em "Geral" se não reconhecer), garantindo que o valor gravado
-        # seja idêntico ao usado no filtro do comando /duvida.
+        # seja idêntico ao usado no filtro de busca do chat.
         subject_enum = Subject.from_string(raw_subject)
         subject = subject_enum.value
         if subject_enum is Subject.GERAL and raw_subject.strip().lower() != "geral":
