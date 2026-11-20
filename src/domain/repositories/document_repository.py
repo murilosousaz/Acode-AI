@@ -22,3 +22,17 @@ class DocumentRepository(ABC):
     ) -> List[DocumentChunk]:
         """Realiza busca por similaridade vetorial (kNN) nos chunks armazenados."""
         raise NotImplementedError
+
+    @abstractmethod
+    async def source_exists(self, source_file: str) -> bool:
+        """Indica se já existem chunks gravados para o arquivo de origem."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def delete_by_source(self, title: str, source_file: str) -> int:
+        """Apaga os chunks de um material (mesmo título e arquivo de origem).
+
+        Usado para que reingerir um PDF substitua os chunks antigos em vez de
+        duplicá-los. Retorna quantos chunks foram apagados.
+        """
+        raise NotImplementedError

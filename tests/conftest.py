@@ -31,6 +31,17 @@ class FakeDocRepo(DocumentRepository):
         self.saved.extend(chunks)
         return [str(i) for i in range(len(chunks))]
 
+    async def source_exists(self, source_file):
+        return any(c.metadata.get("source_file") == source_file for c in self.saved)
+
+    async def delete_by_source(self, title, source_file):
+        before = len(self.saved)
+        self.saved = [
+            c for c in self.saved
+            if not (c.metadata.get("title") == title and c.metadata.get("source_file") == source_file)
+        ]
+        return before - len(self.saved)
+
     async def search_similar_chunks(self, query_vector, top_k=5, subject=None):
         self.last_subject = subject
         return [
