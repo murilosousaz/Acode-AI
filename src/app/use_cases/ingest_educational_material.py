@@ -57,7 +57,6 @@ class IngestEducationalMaterialUseCase:
             logger.warning("PDF '%s' não retornou texto extraível (pode ser digitalizado/imagem).", title)
             return 0
 
-        logger.info("'%s': %d chunks extraídos, gerando embeddings...", title, len(text_chunks))
         embeddings = await self.embedding_generator.generate_embeddings(text_chunks)
 
         source = source_name or os.path.basename(pdf_path)
@@ -74,12 +73,6 @@ class IngestEducationalMaterialUseCase:
             )
             for i, (chunk, vector) in enumerate(zip(text_chunks, embeddings))
         ]
-
-        # Reingerir o mesmo material substitui os chunks antigos (só depois de
-        # os embeddings novos estarem prontos, para não perder dados se falhar).
-        removed = await self.doc_repo.delete_by_source(title, source)
-        if removed:
-            logger.info("'%s': %d chunks antigos substituídos.", title, removed)
 
         inserted_ids = await self.doc_repo.save_chunks(documents)
         return len(inserted_ids)

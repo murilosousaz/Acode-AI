@@ -1,6 +1,4 @@
 import asyncio
-import logging
-import os
 import sys
 
 from src.infrastructure.config.settings import settings
@@ -14,7 +12,6 @@ from src.domain.value_objects.subject import Subject
 
 
 async def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     if len(sys.argv) < 4:
         print("Uso incorreto. Exemplo:\n uv run python -m scripts.ingest_cli <caminho_pdf> <materia> <titulo>")
         print("Matérias reconhecidas: " + ", ".join(s.value for s in Subject))
@@ -37,9 +34,7 @@ async def main():
     use_case = container.ingest_material
 
     print(f"🚀 Iniciando ingestão do PDF: {pdf_path} (Matéria: {subject})...")
-    inserted_count = await use_case.execute(
-        pdf_path=pdf_path, subject=subject, title=title, source_name=os.path.basename(pdf_path)
-    )
+    inserted_count = await use_case.execute(pdf_path=pdf_path, subject=subject, title=title)
     print(f" Concluído! {inserted_count} chunks gravados no MongoDB.")
 
     await close_mongo_connection()

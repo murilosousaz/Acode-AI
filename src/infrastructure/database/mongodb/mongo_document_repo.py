@@ -43,18 +43,6 @@ class MongoDocumentRepository(DocumentRepository):
         logger.info("Inseridos %d chunks na coleção '%s'.", len(result.inserted_ids), self.collection.name)
         return [str(_id) for _id in result.inserted_ids]
 
-    async def source_exists(self, source_file: str) -> bool:
-        doc = await self.collection.find_one(
-            {"metadata.source_file": source_file}, projection={"_id": 1}
-        )
-        return doc is not None
-
-    async def delete_by_source(self, title: str, source_file: str) -> int:
-        result = await self.collection.delete_many(
-            {"metadata.title": title, "metadata.source_file": source_file}
-        )
-        return result.deleted_count
-
     async def search_similar_chunks(
         self,
         query_vector: List[float],

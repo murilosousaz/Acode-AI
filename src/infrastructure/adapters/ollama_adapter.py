@@ -52,11 +52,8 @@ class OllamaAdapter:
 
         embeddings: List[List[float]] = []
         size = self.embedding_batch_size
-        total_batches = -(-len(texts) // size)
-        for n, start in enumerate(range(0, len(texts), size), start=1):
+        for start in range(0, len(texts), size):
             embeddings.extend(await self._embed_batch(texts[start:start + size]))
-            if total_batches > 1:
-                logger.info("Embeddings: lote %d/%d concluído.", n, total_batches)
 
         got = len(embeddings[0])
         if self.embedding_dimensions is not None and got != self.embedding_dimensions:

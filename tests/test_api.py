@@ -141,14 +141,6 @@ def test_upload_pdf_ok(client_factory):
     assert meta["source_file"] == "Fisica_Cinematica.pdf" and "/tmp" not in str(meta)
 
 
-def test_reupload_replaces_chunks_instead_of_duplicating(client_factory):
-    repo = FakeDocRepo()
-    c = client_factory(doc_repo=repo)
-    first = upload(c).json()["chunks_created"]
-    assert upload(c).status_code == 201
-    assert len(repo.saved) == first
-
-
 def test_upload_rejections(client_factory):
     c = client_factory(max_upload_mb=1)
     assert upload(c, content=b"isto nao e pdf").status_code == 415
