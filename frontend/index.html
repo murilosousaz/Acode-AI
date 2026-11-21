@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#2447d1" />
+    <meta name="description" content="Tire dúvidas de vestibular e ENEM com um tutor que responde com base nos materiais de estudo." />
+    <title>AcodeAI — tutor de vestibular</title>
+    <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="assets/css/app.css" />
+    <link rel="stylesheet" href="assets/vendor/katex/katex.min.css" />
+  </head>
+  <body>
+    <a class="skip" href="#question">Ir para o campo de pergunta</a>
+
+    <header class="topbar">
+      <div class="wrap">
+        <a class="brand" href="./">AcodeAI</a>
+        <button id="new-chat" class="btn-quiet" type="button">Nova conversa</button>
+      </div>
+    </header>
+
+    <div id="banner" class="banner" role="status" hidden></div>
+
+    <main class="thread wrap">
+      <noscript>
+        <p class="error">Ative o JavaScript do navegador para usar o AcodeAI.</p>
+      </noscript>
+      <section id="welcome" class="welcome" aria-label="Boas-vindas"></section>
+      <div id="messages" class="messages" role="log" aria-label="Conversa" aria-live="polite" aria-relevant="additions"></div>
+      <div id="followups" aria-label="Sugestões de continuação"></div>
+      <p class="footnote">
+        As respostas usam os materiais cadastrados e podem conter erros: confira o que for importante.
+        <a href="admin/">Área do professor</a>
+      </p>
+    </main>
+
+    <footer class="dock">
+      <div class="wrap">
+        <fieldset id="subjects" class="subjects"></fieldset>
+
+        <form id="composer" class="field" autocomplete="off">
+          <label class="sr-only" for="question">Sua dúvida</label>
+          <textarea
+            id="question"
+            rows="1"
+            placeholder="Escreva sua dúvida…"
+            enterkeyhint="send"
+            aria-describedby="counter"
+          ></textarea>
+          <button id="send" class="send" type="submit" aria-label="Enviar pergunta" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 19V5M5 12l7-7 7 7" />
+            </svg>
+          </button>
+        </form>
+
+        <div class="dock-meta">
+          <span id="key-hint">Enter envia · Shift+Enter pula linha</span>
+          <span id="counter" hidden></span>
+        </div>
+      </div>
+    </footer>
+
+    <dialog id="confirm" aria-labelledby="confirm-title">
+      <form method="dialog">
+        <h2 id="confirm-title">Começar uma nova conversa?</h2>
+        <p>O histórico desta conversa será apagado.</p>
+        <div class="actions">
+          <button class="btn-quiet" value="cancel">Cancelar</button>
+          <button class="btn-primary" value="ok">Apagar e começar</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="announcer" class="sr-only" aria-live="polite"></div>
+
+    <script src="config.js"></script>
+    <script src="assets/vendor/marked.umd.js"></script>
+    <script src="assets/vendor/purify.min.js"></script>
+    <script src="assets/vendor/katex/katex.min.js"></script>
+    <script type="module" src="assets/js/chat.js"></script>
+  </body>
+</html>

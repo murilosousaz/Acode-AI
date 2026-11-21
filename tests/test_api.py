@@ -2,7 +2,7 @@ import uuid
 
 import pymupdf
 
-from tests.conftest import EmptyDocRepo, FakeAI, FakeDocRepo
+from tests.conftest import EmptyDocRepo, ExplodingAI, FakeAI, FakeDocRepo
 
 API = "/api/v1"
 
@@ -112,6 +112,41 @@ def test_ai_unavailable_returns_503_without_leaking_details(client_factory):
     assert "ollama down" not in r.text
 
 
+def test_unexpected_error_is_a_json_500_that_the_browser_can_read(client_factory):
+    """Sem o middleware, o 500 sai sem CORS e o frontend só vê 'Failed to fetch'."""
+    r = client_factory(ai=ExplodingAI()).post(
+        f"{API}/chat/messages",
+        json={"question": "oi"},
+        headers={"Origin": "http://front.test"},
+    )
+    assert r.status_code == 500
+    assert r.json() == {"detail": "Erro interno do servidor."}
+    assert r.headers["access-control-allow-origin"] == "http://front.test"
+    assert "falha inesperada" not in r.text
+
+
+def test_follow_up_question_is_searched_with_the_previous_one(client_factory):
+    ai = FakeAI()
+    c = client_factory(ai=ai)
+    sid = c.post(f"{API}/chat/messages", json={"question": "O que é velocidade média?"}).json()["session_id"]
+    assert c.post(f"{API}/chat/messages", json={"question": "e a aceleração?", "session_id": sid}).status_code == 200
+
+    assert ai.embed_calls[0] == ["O que é velocidade média?"]
+    assert ai.embed_calls[1] == ["e a aceleração?", "O que é velocidade média?\ne a aceleração?"]
+
+
+# ---------------------------------------------------------------- frontend
+def test_frontend_is_served_by_the_api_itself(client):
+    page = client.get("/")
+    assert page.status_code == 200 and "AcodeAI" in page.text
+    assert client.get("/admin/").status_code == 200
+    js = client.get("/assets/js/api.js")
+    assert js.status_code == 200 and js.headers["content-type"].startswith("text/javascript")
+    # a montagem do frontend não engole as rotas da API
+    assert client.get("/health").json() == {"status": "ok"}
+    assert client.get(f"{API}/subjects").status_code == 200
+
+
 # ---------------------------------------------------------------- documents
 def upload(c, content=None, name="Fisica_Cinematica.pdf", headers=None, subject="Fisica", title="Cinemática"):
     return c.post(
@@ -139,6 +174,14 @@ def test_upload_pdf_ok(client_factory):
     assert body["chunks_created"] == len(repo.saved) > 0
     meta = repo.saved[0].metadata
     assert meta["source_file"] == "Fisica_Cinematica.pdf" and "/tmp" not in str(meta)
+
+
+def test_reupload_replaces_chunks_instead_of_duplicating(client_factory):
+    repo = FakeDocRepo()
+    c = client_factory(doc_repo=repo)
+    first = upload(c).json()["chunks_created"]
+    assert upload(c).status_code == 201
+    assert len(repo.saved) == first
 
 
 def test_upload_rejections(client_factory):

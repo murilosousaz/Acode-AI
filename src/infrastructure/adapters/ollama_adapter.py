@@ -52,8 +52,11 @@ class OllamaAdapter:
 
         embeddings: List[List[float]] = []
         size = self.embedding_batch_size
-        for start in range(0, len(texts), size):
+        total_batches = -(-len(texts) // size)
+        for n, start in enumerate(range(0, len(texts), size), start=1):
             embeddings.extend(await self._embed_batch(texts[start:start + size]))
+            if total_batches > 1:
+                logger.info("Embeddings: lote %d/%d concluído.", n, total_batches)
 
         got = len(embeddings[0])
         if self.embedding_dimensions is not None and got != self.embedding_dimensions:
@@ -75,8 +78,10 @@ class OllamaAdapter:
                 if e.status_code == 404:
                     raise self._model_not_found(self.embedding_model, e) from e
                 # 4xx (exceto 404) não se resolve tentando de novo.
-                if e.status_code < 500 or attempt == self.max_retries:
+                if e.status_code < 500:
                     raise
+                if attempt == self.max_retries:
+                    raise self._service_error(e) from e
                 wait = 2 ** attempt
                 logger.warning(
                     "Erro %s ao gerar embeddings (tentativa %d/%d), nova tentativa em %ds.",
@@ -101,6 +106,8 @@ class OllamaAdapter:
         except APIStatusError as e:
             if e.status_code == 404:
                 raise self._model_not_found(self.chat_model, e) from e
+            if e.status_code >= 500:
+                raise self._service_error(e) from e
             raise
         except APIConnectionError as e:
             raise self._unreachable(e) from e
@@ -120,7 +127,7 @@ class OllamaAdapter:
                     "Considere aumentar OLLAMA_MAX_TOKENS."
                 )
                 return reasoning.strip()
-            raise ValueError(
+            raise AIServiceUnavailableError(
                 "O modelo devolveu uma resposta vazia. Aumente OLLAMA_MAX_TOKENS "
                 "ou verifique o modelo."
             )
@@ -138,6 +145,10 @@ class OllamaAdapter:
     @staticmethod
     def _unreachable(cause: Exception) -> AIServiceUnavailableError:
         return AIServiceUnavailableError(f"Ollama inacessível ou lento demais: {cause}")
+
+    @staticmethod
+    def _service_error(cause: APIStatusError) -> AIServiceUnavailableError:
+        return AIServiceUnavailableError(f"Ollama respondeu com erro {cause.status_code}: {cause}")
 
     @staticmethod
     def _model_not_found(model: str, cause: Exception) -> AIServiceUnavailableError:

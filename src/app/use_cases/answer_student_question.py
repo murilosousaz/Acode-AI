@@ -1,5 +1,5 @@
+import asyncio
 import logging
-from typing import List
 
 from src.app.dtos.chat_dto import AnswerDTO, QuestionInput, SourceDTO
 from src.domain.entities.chat_session import Message
@@ -39,20 +39,27 @@ class AnswerStudentQuestionUseCase:
         # 1. Histórico recente da conversa
         session = await self.chat_repo.get_session(query.session_id, limit=PROMPT_HISTORY_LIMIT)
 
-        # 2. Embedding da pergunta + busca vetorial dos chunks relevantes
-        query_vectors = await self.embedding_generator.generate_embeddings([query.question])
-        relevant_chunks = await self.doc_repo.search_similar_chunks(
-            query_vector=query_vectors[0],
-            top_k=self.top_k,
-            subject=query.subject,
+        history = [{"role": m.role, "content": m.content} for m in session.messages]
+
+        # 2. Busca vetorial dos chunks relevantes. Uma pergunta curta de acompanhamento
+        # ("e a aceleração?") não tem assunto sozinho, então também se busca com a
+        # pergunta anterior junto; os resultados das duas buscas são mesclados por score.
+        retrieval_query = PromptBuilderService.build_retrieval_query(history, query.question)
+        texts = [query.question] if retrieval_query == query.question else [query.question, retrieval_query]
+        vectors = await self.embedding_generator.generate_embeddings(texts)
+        result_lists = await asyncio.gather(
+            *(
+                self.doc_repo.search_similar_chunks(query_vector=v, top_k=self.top_k, subject=query.subject)
+                for v in vectors
+            )
         )
+        relevant_chunks = PromptBuilderService.merge_ranked_chunks(result_lists, self.top_k)
 
         if not relevant_chunks:
             return AnswerDTO(session_id=query.session_id, answer=NO_CONTEXT_MESSAGE, sources=[])
 
         # 3. Prompt (regra de domínio isolada no PromptBuilderService)
         context_text = PromptBuilderService.build_context(relevant_chunks)
-        history = [{"role": m.role, "content": m.content} for m in session.messages]
         messages = PromptBuilderService.build_messages(history, context_text, query.question)
 
         # 4. Resposta do modelo de chat

@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     CORS_ALLOW_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
     # Tamanho máximo do PDF enviado, em MB.
     MAX_UPLOAD_MB: int = 25
+    # Serve a pasta `frontend/` em "/" (mesma origem da API, sem CORS). Desligue
+    # se o frontend for hospedado separadamente.
+    SERVE_FRONTEND: bool = True
 
     # `extra="ignore"` evita erro caso o .env antigo ainda tenha variáveis
     # removidas (DISCORD_BOT_TOKEN, GOOGLE_API_KEY, DEEPSEEK_*...).

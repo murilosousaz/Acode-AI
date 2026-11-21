@@ -1,0 +1,6 @@
+{
+  "name": "acodeai-frontend",
+  "private": true,
+  "type": "module",
+  "description": "Frontend estático do AcodeAI (sem build). Os testes ficam em ../tests/frontend: rode `node --test tests/frontend/` na raiz do projeto."
+}

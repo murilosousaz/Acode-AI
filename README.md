@@ -83,6 +83,8 @@ no código do navegador** (use um painel admin protegido ou chame por backend).
 
 ### Exemplo de consumo no frontend
 
+(O frontend pronto está em `frontend/`; veja `frontend/assets/js/api.js` para um cliente completo, com tratamento de erros.)
+
 ```ts
 const API = "http://localhost:8000/api/v1";
 
@@ -103,6 +105,33 @@ export async function ask(question: string, subject?: string) {
 
 Erros seguem o formato `{"detail": "..."}` (em erros de validação, `detail` é
 uma lista no padrão do FastAPI).
+
+## Frontend
+
+A pasta `frontend/` tem a interface web, em HTML/CSS/JS puro (**sem build, sem
+Node**). A própria API a serve na raiz, na mesma origem, então não há CORS para
+configurar:
+
+| Endereço                      | O quê                                                   |
+|-------------------------------|---------------------------------------------------------|
+| `http://localhost:8000/`      | Tutor: o aluno escolhe a matéria e conversa             |
+| `http://localhost:8000/admin/`| Área do professor: envia PDFs (pede a `ADMIN_API_KEY`)  |
+
+O que o aluno encontra: perguntas de exemplo para começar, filtro por matéria,
+respostas em Markdown com fórmulas (KaTeX), fontes recolhíveis, atalhos de
+continuação ("Explique de outro jeito", "Dê um exemplo"), conversa que continua
+depois de recarregar a página, aviso de limite de perguntas com contagem
+regressiva e mensagens de erro em português com "Tentar de novo". Funciona no
+celular, em modo claro/escuro e com teclado/leitor de tela.
+
+As bibliotecas (marked, DOMPurify, KaTeX) ficam em `frontend/assets/vendor/`
+(licenças em `THIRD_PARTY.md`), então a interface funciona sem internet. A
+resposta da IA é sanitizada antes de ir para a página.
+
+**Hospedar o frontend separado da API** (Vercel, Netlify...): edite
+`apiBase` em `frontend/config.js`, coloque o endereço do frontend em
+`CORS_ALLOW_ORIGINS` e, se quiser, desligue o serviço da pasta na API com
+`SERVE_FRONTEND=false`.
 
 ## Pré-requisitos
 
@@ -154,6 +183,7 @@ o rate limit enxergar o IP real do cliente.
 | `ADMIN_API_KEY`             |             | Chave do header `X-API-Key` para upload de PDFs; vazia = desabilitado |
 | `CORS_ALLOW_ORIGINS`        |             | Origens do frontend, separadas por vírgula                          |
 | `MAX_UPLOAD_MB`             |             | Tamanho máximo do PDF (padrão: `25`)                                |
+| `SERVE_FRONTEND`            |             | Serve `frontend/` em `/` (padrão: `true`)                           |
 | `OLLAMA_BASE_URL`           |             | Endpoint OpenAI-compatível (padrão: `http://localhost:11434/v1`)    |
 | `OLLAMA_CHAT_MODEL`         |             | Modelo de chat (padrão: `qwen2.5:7b`)                               |
 | `OLLAMA_EMBEDDING_MODEL`    |             | Modelo de embeddings (padrão: `nomic-embed-text`)                   |
@@ -166,12 +196,25 @@ o rate limit enxergar o IP real do cliente.
 ## Testes
 
 ```bash
-uv run pytest
+uv run pytest                                  # backend (e E2E, se o Playwright estiver instalado)
+node --test "tests/frontend/*.test.mjs"        # unidade do frontend (Node 20+, sem dependências)
 ```
 
-A suíte usa repositórios e IA falsos (não precisa de Mongo nem Ollama) e
-cobre os endpoints, validações, rate limit, autenticação admin, upload, CORS e
-o adaptador do Ollama (via transporte HTTP simulado).
+O backend usa repositórios e IA falsos (não precisa de Mongo nem Ollama) e
+cobre endpoints, validações, rate limit, autenticação admin, upload, CORS, o
+adaptador do Ollama (transporte HTTP simulado), a busca com contexto da
+conversa, o pipeline do `$vectorSearch`, o middleware de erros e o serviço do
+frontend.
+
+**E2E do frontend** (opcional): abrem a interface num Chromium de verdade contra
+um servidor de simulação (`tests/e2e/mock_server.py`, só biblioteca padrão) que
+reproduz o contrato da API, incluindo 429, 503, 500 e proxy devolvendo HTML.
+Sem o Playwright instalado, eles são pulados:
+
+```bash
+uv add --dev playwright && uv run playwright install chromium
+uv run pytest tests/e2e
+```
 
 ## Notas de migração
 
@@ -192,8 +235,10 @@ o adaptador do Ollama (via transporte HTTP simulado).
   proteção de uma conversa. Para contas reais, adicione login/JWT e associe as
   sessões ao usuário.
 - A resposta do chat não é transmitida em streaming; com modelos locais ela pode
-  levar dezenas de segundos. SSE em `/chat/messages/stream` é o próximo passo
-  natural para a UX do frontend.
+  levar dezenas de segundos (o frontend mostra o tempo decorrido e permite
+  cancelar). SSE em `/chat/messages/stream` é o próximo passo natural.
+- O rate limit é por IP: numa escola ou cursinho todos os alunos compartilham o
+  mesmo IP de saída. Ajuste `RATE_LIMIT_REQUESTS` para o tamanho das turmas.
 - O rate limiter é em memória por processo; com várias réplicas, migre para Redis.
 - `PyMuPDFAdapter` não faz OCR: PDFs digitalizados não geram texto.
 - O driver `motor` está depreciado (fim do suporte previsto para maio/2027);

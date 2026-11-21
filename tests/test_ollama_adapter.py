@@ -95,3 +95,48 @@ async def test_chat_returns_stripped_content_and_sends_max_tokens():
 
     adapter = make_adapter(handler)
     assert await adapter.generate_chat_completion([{"role": "user", "content": "oi"}]) == "olá"
+
+
+def chat_ok(content):
+    return httpx.Response(200, json={
+        "id": "1", "object": "chat.completion", "created": 0, "model": "chat-m",
+        "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": content}}],
+    })
+
+
+async def test_chat_5xx_from_ollama_becomes_ai_unavailable():
+    adapter = make_adapter(lambda r: httpx.Response(500, json={"error": {"message": "runner crashed"}}))
+    with pytest.raises(AIServiceUnavailableError, match="500"):
+        await adapter.generate_chat_completion([{"role": "user", "content": "oi"}])
+
+
+async def test_chat_4xx_is_not_reported_as_service_unavailable():
+    """400 = prompt inválido (bug nosso): continua um erro interno, não 'tente de novo'."""
+    from openai import BadRequestError
+
+    adapter = make_adapter(lambda r: httpx.Response(400, json={"error": {"message": "bad request"}}))
+    with pytest.raises(BadRequestError):
+        await adapter.generate_chat_completion([{"role": "user", "content": "oi"}])
+
+
+async def test_empty_model_answer_becomes_ai_unavailable():
+    adapter = make_adapter(lambda r: chat_ok("   "))
+    with pytest.raises(AIServiceUnavailableError, match="vazia"):
+        await adapter.generate_chat_completion([{"role": "user", "content": "oi"}])
+
+
+async def test_embedding_5xx_after_all_retries_becomes_ai_unavailable(monkeypatch):
+    async def no_sleep(_):
+        pass
+
+    monkeypatch.setattr("src.infrastructure.adapters.ollama_adapter.asyncio.sleep", no_sleep)
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(503, json={"error": {"message": "busy"}})
+
+    adapter = make_adapter(handler, max_retries=3)
+    with pytest.raises(AIServiceUnavailableError):
+        await adapter.generate_embeddings(["a"])
+    assert calls["n"] == 3

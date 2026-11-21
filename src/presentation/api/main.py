@@ -13,7 +13,9 @@ from src.infrastructure.database.mongodb.connection import (
     db_context,
 )
 from src.presentation.api.errors import register_exception_handlers
+from src.presentation.api.middleware import UnhandledErrorMiddleware
 from src.presentation.api.routers import chat, documents, meta
+from src.presentation.web import mount_frontend
 
 API_PREFIX = "/api/v1"
 
@@ -48,7 +50,13 @@ def create_app(container: Optional[Container] = None) -> FastAPI:
         lifespan=lifespan,
     )
 
-    cors_origins = container.settings.cors_origins if container else settings.cors_origins
+    active_settings = container.settings if container else settings
+    cors_origins = active_settings.cors_origins
+
+    # ORDEM IMPORTA: o último middleware adicionado fica mais externo. O catch-all
+    # precisa ficar DENTRO do CORS; do contrário, um 500 sai sem os cabeçalhos CORS
+    # e o navegador esconde a mensagem de erro ("Failed to fetch").
+    app.add_middleware(UnhandledErrorMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
@@ -62,6 +70,10 @@ def create_app(container: Optional[Container] = None) -> FastAPI:
     app.include_router(meta.api_router, prefix=API_PREFIX)
     app.include_router(chat.router, prefix=API_PREFIX)
     app.include_router(documents.router, prefix=API_PREFIX)
+
+    # Por último: a montagem em "/" captura tudo o que as rotas acima não atenderam.
+    if active_settings.SERVE_FRONTEND:
+        mount_frontend(app)
     return app
 
 
