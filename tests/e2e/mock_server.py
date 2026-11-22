@@ -5,7 +5,10 @@ exercitarem os cenários que são difíceis de provocar na API de verdade (429, 
 devolvendo HTML...). O formato das respostas segue `src/presentation/api/schemas.py`.
 
 Gatilhos dentro do texto da pergunta:
-  #429 #503 #500 #502html #badjson #slow #flaky #nocontext #xss #math
+  #429 #503 #500 #502html #badjson #flaky #nocontext #xss #math      (valem para os dois endpoints)
+  #slow     endpoint clássico: demora 3 s; streaming: demora 3 s até o primeiro pedaço
+  #trickle  streaming: um pedaço a cada 0,25 s (dá tempo de ver o texto crescer e de parar)
+  #midfail  streaming: dois pedaços e depois um evento `error` 503
 """
 
 import json
@@ -21,6 +24,10 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
+CHAT_PATH = "/api/v1/chat/messages"
+STREAM_PATH = CHAT_PATH + "/stream"
+CHAT_PATHS = {CHAT_PATH, STREAM_PATH}
+AI_DOWN = "O serviço de IA está indisponível no momento. Tente novamente em instantes."
 ADMIN_KEY = "secret"
 MAX_UPLOAD_BYTES = 1024 * 1024
 
@@ -78,6 +85,7 @@ class MockApi:
         self.ready = True
         self.subjects_fail = False
         self.rate_limit_retry_after = 2
+        self.stream_enabled = True
         self._server = None
 
     # ---- ciclo de vida
@@ -107,9 +115,14 @@ class MockApi:
         self.flaky_seen.clear()
         self.ready = True
         self.subjects_fail = False
+        self.stream_enabled = True
 
     def chat_posts(self):
-        return [r for r in self.requests if r["method"] == "POST" and r["path"] == "/api/v1/chat/messages"]
+        """Perguntas enviadas (pelo endpoint clássico ou pelo de streaming)."""
+        return [r for r in self.requests if r["method"] == "POST" and r["path"] in CHAT_PATHS]
+
+    def stream_posts(self):
+        return [r for r in self.requests if r["method"] == "POST" and r["path"] == STREAM_PATH]
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -176,15 +189,20 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
         raw = self._read_body()
-        if path == "/api/v1/chat/messages":
+        if path == CHAT_PATH:
             return self._chat(raw)
+        if path == STREAM_PATH:
+            if not self.owner.stream_enabled:  # simula uma API antiga, sem o endpoint
+                self._record()
+                return self._send(404, {"detail": "Not Found"})
+            return self._chat(raw, stream=True)
         if path == "/api/v1/documents":
             return self._upload(raw)
         self._record()
         return self._send(404, {"detail": "Not Found"})
 
     # ---- chat
-    def _chat(self, raw):
+    def _chat(self, raw, stream=False):
         try:
             payload = json.loads(raw or b"{}")
         except json.JSONDecodeError:
@@ -213,7 +231,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(429, {"detail": "Limite de perguntas por minuto atingido."},
                               headers={"Retry-After": str(self.owner.rate_limit_retry_after)})
         if "#503" in text:
-            return self._send(503, {"detail": "O serviço de IA está indisponível no momento. Tente novamente em instantes."})
+            return self._send(503, {"detail": AI_DOWN})
         if "#500" in text:
             return self._send(500, {"detail": "Erro interno do servidor."})
         if "#502html" in text:
@@ -222,8 +240,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(200, {"unexpected": True})
         if "#flaky" in text and text not in self.owner.flaky_seen:
             self.owner.flaky_seen.add(text)
-            return self._send(503, {"detail": "O serviço de IA está indisponível no momento. Tente novamente em instantes."})
-        if "#slow" in text:
+            return self._send(503, {"detail": AI_DOWN})
+        if "#slow" in text and not stream:
             time.sleep(3)
 
         sid = session_id or str(uuid.uuid4())
@@ -238,12 +256,52 @@ class _Handler(BaseHTTPRequestHandler):
                       "- A unidade no SI é **m/s**.\n\nExemplo: 120 km em 2 h dá 60 km/h.")
             sources = SOURCES + SOURCES[:1]  # fonte repetida: o front deve deduplicar
 
+        if stream:
+            return self._stream(sid, text, answer, sources)
+        self._remember(sid, text, answer, sources)
+        return self._send(200, {"session_id": sid, "answer": answer, "sources": sources})
+
+    def _remember(self, sid, question, answer, sources):
         if sources:  # igual à API real: sem contexto, a troca não entra no histórico
             now = "2026-11-20T12:00:00Z"
             history = self.owner.sessions.setdefault(sid, [])
-            history += [{"role": "user", "content": text, "timestamp": now},
+            history += [{"role": "user", "content": question, "timestamp": now},
                         {"role": "assistant", "content": answer, "timestamp": now}]
-        return self._send(200, {"session_id": sid, "answer": answer, "sources": sources})
+
+    # ---- streaming (SSE sobre HTTP chunked)
+    def _chunk(self, text):
+        data = text.encode()
+        self.wfile.write(f"{len(data):x}\r\n".encode() + data + b"\r\n")
+        self.wfile.flush()
+
+    @staticmethod
+    def _event(name, data):
+        return f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+    def _stream(self, sid, question, answer, sources):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        pieces = re.findall(r"\S+\s*|\s+", answer) if sources else [answer]
+        delay = 0.25 if "#trickle" in question else 0.01
+        try:
+            self._chunk(": ping\n\n")  # heartbeat: o front precisa ignorá-lo
+            self._chunk(self._event("meta", {"session_id": sid, "sources": sources}))
+            if "#slow" in question:
+                time.sleep(3)
+            for index, piece in enumerate(pieces):
+                if "#midfail" in question and index == 2:
+                    self._chunk(self._event("error", {"status": 503, "detail": AI_DOWN}))
+                    return self.wfile.write(b"0\r\n\r\n")
+                self._chunk(self._event("token", {"text": piece}))
+                time.sleep(delay)
+            self._remember(sid, question, answer, sources)  # só ao terminar, como a API real
+            self._chunk(self._event("done", {}))
+            self.wfile.write(b"0\r\n\r\n")
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # o aluno clicou em "Parar": nada é gravado
 
     # ---- upload de PDF (área do professor)
     def _upload(self, raw):

@@ -6,7 +6,7 @@ import re
 import pytest
 from playwright.sync_api import expect
 
-ANSWER = ".msg-assistant:not(.typing)"
+ANSWER = ".msg-assistant:not(.typing):not(.streaming)"  # resposta FINAL (a em andamento tem .streaming)
 
 
 def open_chat(page):
@@ -122,6 +122,89 @@ def test_follow_up_shortcuts_reuse_the_session(page, mock_api):
     assert body["question"] == "Dê um exemplo" and "session_id" in body
 
 
+# ------------------------------------------------------------------ streaming
+def test_answer_grows_while_it_is_being_written_and_ends_with_sources(page, mock_api):
+    open_chat(page)
+    ask(page, "texto que cresce #trickle")
+
+    live = page.locator(".msg-assistant.streaming")
+    expect(live).to_be_visible()
+    expect(live).to_have_attribute("aria-busy", "true")
+    expect(page.locator(".typing")).to_have_count(0)  # o "Pensando…" sai quando o texto começa
+    expect(page.get_by_role("button", name="Parar")).to_be_visible()
+    expect(page.locator("#send")).to_be_disabled()  # uma pergunta de cada vez
+    expect(page.locator("#followups button")).to_have_count(0)
+
+    expect(live.locator(".prose")).to_contain_text("Sobre")  # já há texto...
+    expect(page.locator(ANSWER)).to_have_count(0)  # ...mas a resposta final ainda não existe
+    assert page.evaluate("document.querySelectorAll('.streaming .sources').length") == 0
+
+    expect(page.locator(ANSWER)).to_be_visible(timeout=15000)  # termina: nó final no lugar do provisório
+    expect(live).to_have_count(0)
+    expect(page.locator(".sources summary")).to_have_text("Fontes (2)")
+    expect(page.locator("#followups button")).to_have_count(3)
+    expect(page.get_by_role("button", name="Copiar")).to_be_visible()
+    assert len(mock_api.stream_posts()) == 1
+
+
+def test_stop_button_discards_the_partial_answer_and_nothing_is_saved(page, mock_api):
+    open_chat(page)
+    ask(page, "vou parar #trickle")
+    expect(page.locator(".msg-assistant.streaming .prose")).to_contain_text("Sobre")
+
+    page.get_by_role("button", name="Parar").click()
+    expect(page.locator(".error-title")).to_have_text("Pergunta cancelada")
+    expect(page.locator(".msg-assistant")).to_have_count(0)  # o trecho parcial some
+    expect(page.get_by_role("button", name="Tentar de novo")).to_be_visible()
+    page.wait_for_timeout(500)
+    assert mock_api.sessions == {}  # o servidor não gravou uma resposta pela metade
+    assert page.evaluate("localStorage.getItem('acodeai:messages')") is None
+
+
+def test_failure_midway_discards_the_partial_text_and_offers_retry(page, mock_api):
+    open_chat(page)
+    ask(page, "cai no meio #midfail")
+    expect(page.locator(".error-title")).to_have_text("Tutor indisponível agora")
+    expect(page.locator(".msg-assistant")).to_have_count(0)
+    expect(page.get_by_role("button", name="Tentar de novo")).to_be_visible()
+    assert mock_api.sessions == {}
+    assert page.evaluate("localStorage.getItem('acodeai:messages')") is None
+
+
+def test_falls_back_to_the_classic_endpoint_when_the_api_has_no_streaming(page, mock_api):
+    mock_api.stream_enabled = False
+    open_chat(page)
+    ask(page, "primeira")
+    expect(page.locator(ANSWER)).to_be_visible()
+    ask(page, "segunda")
+    expect(page.locator(ANSWER)).to_have_count(2)
+
+    assert len(mock_api.stream_posts()) == 1  # só a primeira tentou o stream; depois o front lembra
+    classic = [r for r in mock_api.chat_posts() if r["path"] == "/api/v1/chat/messages"]
+    assert [r["json"]["question"] for r in classic] == ["primeira", "segunda"]
+    expect(page.locator(".error")).to_have_count(0)
+
+
+def test_streaming_can_be_turned_off_in_config_js(page, mock_api):
+    page.route("**/config.js", lambda route: route.fulfill(content_type="text/javascript", body="window.ACODEAI = { apiBase: '', stream: false };"))
+    open_chat(page)
+    ask(page, "sem streaming")
+    expect(page.locator(ANSWER)).to_be_visible()
+    assert mock_api.stream_posts() == []
+    assert [r["path"] for r in mock_api.chat_posts()] == ["/api/v1/chat/messages"]
+
+
+def test_math_and_html_safety_also_hold_for_the_text_that_arrives_in_pieces(page):
+    open_chat(page)
+    ask(page, "#math #trickle")
+    live_text = page.locator(".msg-assistant.streaming .prose")
+    expect(live_text).to_be_visible()
+    # nenhum LaTeX "cru" quebrado nem script executado no meio do caminho
+    assert page.evaluate("window.__xss") is None
+    expect(page.locator(f"{ANSWER} .katex").first).to_be_visible(timeout=20000)
+    assert page.locator(f"{ANSWER} .katex").count() >= 4
+
+
 # ------------------------------------------------------------------ campo de pergunta
 def test_enter_sends_and_shift_enter_breaks_the_line(page, mock_api):
     open_chat(page)
@@ -218,10 +301,10 @@ def test_server_failures_show_a_friendly_message(page, trigger, title):
 
 def test_network_failure_shows_connection_message(page):
     open_chat(page)
-    page.route("**/api/v1/chat/messages", lambda route: route.abort())
+    page.route("**/api/v1/chat/messages/stream", lambda route: route.abort())
     ask(page, "oi")
     expect(page.locator(".error-title")).to_have_text("Sem conexão com o servidor")
-    page.unroute("**/api/v1/chat/messages")
+    page.unroute("**/api/v1/chat/messages/stream")
     page.get_by_role("button", name="Tentar de novo").click()
     expect(page.locator(ANSWER)).to_be_visible()
 
@@ -229,7 +312,7 @@ def test_network_failure_shows_connection_message(page):
 def test_server_validation_error_puts_the_question_back_in_the_field(page):
     open_chat(page)
     page.route(
-        "**/api/v1/chat/messages",
+        "**/api/v1/chat/messages/stream",
         lambda route: route.fulfill(
             status=422,
             content_type="application/json",

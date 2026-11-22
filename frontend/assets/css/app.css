@@ -443,6 +443,25 @@ button:disabled {
   padding: 0.2rem 0;
 }
 
+/* resposta sendo escrita: cursor piscando no fim do último bloco */
+.streaming .prose > :is(p, h1, h2, h3, h4, blockquote):last-child::after,
+.streaming .prose > :is(ul, ol):last-child > li:last-child::after {
+  content: "";
+  display: inline-block;
+  width: 0.5em;
+  height: 1.05em;
+  margin-left: 0.2em;
+  vertical-align: text-bottom;
+  background: var(--pen);
+  opacity: 0.6;
+  animation: caret 1s steps(2, start) infinite;
+}
+@keyframes caret {
+  to {
+    visibility: hidden;
+  }
+}
+
 /* sem resultado nos materiais */
 .help {
   margin-top: 0.8rem;

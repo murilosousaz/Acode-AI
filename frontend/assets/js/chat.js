@@ -20,6 +20,8 @@ const KEYS = { session: "acodeai:session", subject: "acodeai:subject", messages:
 const MAX_STORED_MESSAGES = 40;
 const COUNTER_FROM = Math.floor(MAX_QUESTION_CHARS * 0.8);
 const SLOW_HINT_AFTER_S = 15;
+const RENDER_EVERY_MS = 60; // com streaming, o Markdown é redesenhado no máximo ~16x por segundo
+const USE_STREAMING = config.stream !== false;
 
 // ------------------------------------------------------------------ persistência (tolerante a falhas)
 const store = {
@@ -299,6 +301,42 @@ function scrollToBottom() {
   window.scrollTo({ top: document.documentElement.scrollHeight, behavior: scrollBehavior() });
 }
 
+// ------------------------------------------------------------------ resposta em andamento (streaming)
+// Mostra o texto conforme ele chega. Ao terminar, é trocada pela resposta final (com fontes e ações).
+function startLive() {
+  hideTyping();
+  const body = h("div", { class: "prose", "aria-live": "off" }); // leitor de tela lê só a resposta final
+  const node = h(
+    "article",
+    { class: "msg msg-assistant streaming", "aria-busy": "true" },
+    h("span", { class: "sr-only" }, "Resposta do AcodeAI, sendo escrita: "),
+    body,
+    h("div", { class: "msg-actions" }, h("button", { class: "btn-link", type: "button", onclick: cancel }, "Parar")),
+  );
+  el.messages.append(node);
+  // O aluno lê de cima: mostra a pergunta e o começo da resposta e deixa o texto crescer para baixo.
+  state.pending?.el.scrollIntoView({ block: "start", behavior: scrollBehavior() });
+
+  const live = {
+    node,
+    text: "",
+    timer: null,
+    render() {
+      live.timer = null;
+      body.innerHTML = renderMarkdown(live.text); // sanitizado em markdown.js
+    },
+    push(piece) {
+      live.text += piece;
+      if (live.timer === null) live.timer = setTimeout(live.render, RENDER_EVERY_MS);
+    },
+    discard() {
+      clearTimeout(live.timer);
+      node.remove();
+    },
+  };
+  return live;
+}
+
 // ------------------------------------------------------------------ indicador de espera
 function showTyping() {
   const text = h("span", { class: "typing-text" }, "Pensando…");
@@ -402,13 +440,21 @@ async function ask(question, { subject = state.subject, retry = false } = {}) {
   showTyping();
   const controller = new AbortController();
   state.controller = controller;
+  let live = null;
 
   try {
-    const result = await client.sendMessage({ question, subject, sessionId: state.sessionId }, { signal: controller.signal });
-    commit(question, subject, result);
+    const input = { question, subject, sessionId: state.sessionId };
+    const result = USE_STREAMING
+      ? await client.streamMessage(input, {
+          signal: controller.signal,
+          onToken: (piece) => (live ??= startLive()).push(piece),
+        })
+      : await client.sendMessage(input, { signal: controller.signal });
+    commit(question, subject, result, { live });
   } catch (error) {
     fail(error instanceof ApiError ? error : new ApiError("server"));
   } finally {
+    live?.discard(); // resposta parcial de uma falha/cancelamento; após o sucesso o nó já foi trocado
     hideTyping();
     state.busy = false;
     state.controller = null;
@@ -416,7 +462,7 @@ async function ask(question, { subject = state.subject, retry = false } = {}) {
   }
 }
 
-function commit(question, subject, result) {
+function commit(question, subject, result, { live = null } = {}) {
   state.sessionId = result.sessionId;
   store.set(KEYS.session, state.sessionId);
 
@@ -429,10 +475,15 @@ function commit(question, subject, result) {
   store.set(KEYS.messages, state.messages.slice(-MAX_STORED_MESSAGES));
 
   const node = assistantMessage(state.messages.at(-1), { latest: true });
-  el.messages.append(node);
+  if (live) {
+    live.discard(); // cancela a renderização pendente e tira o nó provisório...
+    el.messages.append(node);
+  } else {
+    el.messages.append(node);
+    // Mostra a pergunta e o começo da resposta (em respostas longas, o aluno lê de cima).
+    (questionBubble ?? node).scrollIntoView({ block: "start", behavior: scrollBehavior() });
+  }
   renderFollowups();
-  // Mostra a pergunta e o começo da resposta (em respostas longas, o aluno lê de cima).
-  (questionBubble ?? node).scrollIntoView({ block: "start", behavior: scrollBehavior() });
   announce("Nova resposta do AcodeAI.");
   // O botão clicado (exemplo/atalho) some da tela: devolve o foco ao campo. No celular não,
   // para o teclado não abrir sozinho depois de cada resposta.

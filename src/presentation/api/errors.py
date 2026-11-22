@@ -4,6 +4,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from src.domain.errors import AIServiceUnavailableError
+from src.presentation.api.sse import AI_UNAVAILABLE_DETAIL
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +16,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         logger.error("Serviço de IA indisponível: %s", exc)
         return JSONResponse(
             status_code=503,
-            content={"detail": "O serviço de IA está indisponível no momento. Tente novamente em instantes."},
+            content={"detail": AI_UNAVAILABLE_DETAIL},
         )
 
     @app.exception_handler(Exception)

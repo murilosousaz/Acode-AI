@@ -4,6 +4,7 @@ from typing import List, Optional
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from src.domain.entities.document import DocumentChunk
+from src.domain.entities.embedding_stamp import EmbeddingStamp
 from src.domain.repositories.document_repository import DocumentRepository
 
 logger = logging.getLogger(__name__)
@@ -105,4 +106,26 @@ class MongoDocumentRepository(DocumentRepository):
                 chunk_id=str(doc.get("_id")),
             )
             for doc in results
+        ]
+
+    async def embedding_stamps(self) -> List[EmbeddingStamp]:
+        pipeline = [
+            {
+                "$group": {
+                    "_id": {
+                        "model": "$metadata.embedding_model",
+                        "prefix": "$metadata.embedding_document_prefix",
+                    },
+                    "count": {"$sum": 1},
+                }
+            }
+        ]
+        groups = await self.collection.aggregate(pipeline).to_list(length=None)
+        return [
+            EmbeddingStamp(
+                model=g["_id"].get("model"),
+                document_prefix=g["_id"].get("prefix"),
+                count=g["count"],
+            )
+            for g in groups
         ]

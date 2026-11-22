@@ -5,5 +5,6 @@
 // Nesse caso, coloque o endereço do frontend em CORS_ALLOW_ORIGINS no .env da API.
 window.ACODEAI = {
   apiBase: "", // "" = mesma origem. Exemplo: "https://api.minhaescola.com.br"
-  // chatTimeoutMs: 200000, // quanto esperar por uma resposta antes de desistir
+  // chatTimeoutMs: 200000, // quanto esperar em SILÊNCIO por uma resposta antes de desistir
+  // stream: false,         // desliga o streaming (a resposta só aparece inteira, no fim)
 };

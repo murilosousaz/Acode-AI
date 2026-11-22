@@ -3,6 +3,8 @@ import uuid
 import pymupdf
 
 from tests.conftest import EmptyDocRepo, ExplodingAI, FakeAI, FakeDocRepo
+from tests.fakes import MidStreamFailAI
+from tests.sse_helpers import parse_events
 
 API = "/api/v1"
 
@@ -133,6 +135,55 @@ def test_follow_up_question_is_searched_with_the_previous_one(client_factory):
 
     assert ai.embed_calls[0] == ["O que é velocidade média?"]
     assert ai.embed_calls[1] == ["e a aceleração?", "O que é velocidade média?\ne a aceleração?"]
+
+
+# ---------------------------------------------------------------- streaming (SSE)
+def stream(client, **body):
+    body.setdefault("question", "O que é velocidade média?")
+    return client.post(f"{API}/chat/messages/stream", json=body, headers={"Origin": "http://front.test"})
+
+
+def test_stream_returns_events_and_keeps_the_session(client):
+    r = stream(client, subject="Fisica")
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream")
+    assert r.headers["access-control-allow-origin"] == "http://front.test"
+
+    events = parse_events(r.text)
+    assert [n for n, _ in events] == ["meta", "token", "token", "token", "done"]
+    session_id = events[0][1]["session_id"]
+    uuid.UUID(session_id)  # um UUID válido foi criado
+    assert events[0][1]["sources"][0]["title"] == "Cinemática"
+    assert "".join(d["text"] for n, d in events if n == "token") == "A velocidade média é **Δs/Δt**."
+
+    history = client.get(f"{API}/chat/sessions/{session_id}").json()["messages"]
+    assert [m["role"] for m in history] == ["user", "assistant"]
+    assert stream(client, session_id=session_id).status_code == 200  # continua a mesma conversa
+
+
+def test_stream_errors_before_the_first_byte_are_normal_http_errors(client_factory):
+    c = client_factory()
+    assert stream(c, question="").status_code == 422
+    assert stream(c, subject="Inexistente").status_code == 422
+
+    r = stream(client_factory(ai=FakeAI(fail=True)))  # a busca falha antes de o stream começar
+    assert r.status_code == 503 and r.json() == {"detail": "O serviço de IA está indisponível no momento. Tente novamente em instantes."}
+    assert r.headers["access-control-allow-origin"] == "http://front.test"
+
+
+def test_stream_shares_the_rate_limit_with_the_regular_endpoint(client_factory):
+    c = client_factory(rate_limit=2)
+    assert stream(c).status_code == 200
+    assert c.post(f"{API}/chat/messages", json={"question": "oi"}).status_code == 200
+    r = stream(c)
+    assert r.status_code == 429 and int(r.headers["retry-after"]) >= 1
+
+
+def test_stream_failure_midway_arrives_as_an_error_event(client_factory):
+    r = stream(client_factory(ai=MidStreamFailAI(after=1)))
+    assert r.status_code == 200
+    events = parse_events(r.text)
+    assert [n for n, _ in events] == ["meta", "token", "error"]
+    assert events[-1][1]["status"] == 503 and "ollama down" not in r.text
 
 
 # ---------------------------------------------------------------- frontend

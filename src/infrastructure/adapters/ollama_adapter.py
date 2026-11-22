@@ -1,10 +1,11 @@
 import asyncio
 import logging
-from typing import Dict, List, Optional
+from typing import AsyncIterator, Dict, List, Optional
 
 from openai import APIConnectionError, APIStatusError, AsyncOpenAI
 
 from src.domain.errors import AIServiceUnavailableError
+from src.domain.ports import EmbeddingPurpose
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,8 @@ class OllamaAdapter:
         timeout: float = 180.0,
         embedding_batch_size: int = 32,
         max_retries: int = 3,
+        query_prefix: str = "",
+        document_prefix: str = "",
     ):
         # O Ollama ignora a chave, mas o SDK exige um valor não vazio.
         # max_retries=0 no SDK: as tentativas são controladas aqui, para que
@@ -40,15 +43,32 @@ class OllamaAdapter:
         self.max_tokens = max_tokens
         self.embedding_batch_size = embedding_batch_size
         self.max_retries = max_retries
+        # Prefixos de tarefa (ex.: nomic-embed-text: "search_query:" / "search_document:").
+        # Vazio = sem prefixo (comportamento anterior).
+        self.query_prefix = self._normalize_prefix(query_prefix)
+        self.document_prefix = self._normalize_prefix(document_prefix)
+
+    @staticmethod
+    def _normalize_prefix(prefix: Optional[str]) -> str:
+        """"search_query:" e "search_query: " viram a mesma coisa (um espaço depois dos dois pontos).
+        O espaço final se perderia num .env sem aspas."""
+        prefix = (prefix or "").strip()
+        return f"{prefix} " if prefix else ""
 
     # ------------------------------------------------------------------ embeddings
-    async def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
+    async def generate_embeddings(
+        self, texts: List[str], purpose: EmbeddingPurpose = "document"
+    ) -> List[List[float]]:
         """Gera embeddings em lotes. Valida a dimensão do vetor: se o modelo
         devolver um tamanho diferente de `embedding_dimensions` (ex.: trocou o
         modelo mas não o índice vetorial), falha com mensagem clara em vez de
         gravar/consultar vetores incompatíveis."""
         if not texts:
             return []
+
+        prefix = self.query_prefix if purpose == "query" else self.document_prefix
+        if prefix:
+            texts = [prefix + t for t in texts]
 
         embeddings: List[List[float]] = []
         size = self.embedding_batch_size
@@ -132,6 +152,50 @@ class OllamaAdapter:
                 "ou verifique o modelo."
             )
         return content.strip()
+
+    async def stream_chat_completion(
+        self, messages: List[Dict[str, str]], temperature: float = 0.3
+    ) -> AsyncIterator[str]:
+        """Resposta do modelo aos pedaços. Mesmos erros de `generate_chat_completion`.
+
+        Só o texto final é entregue: o raciocínio de modelos "thinking" não é transmitido
+        (nesse caso o aluno vê a espera inicial mais longa, não o "pensamento").
+        """
+        produced = False
+        try:
+            stream = await self.client.chat.completions.create(
+                model=self.chat_model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=self.max_tokens,
+                stream=True,
+            )
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+                piece = getattr(chunk.choices[0].delta, "content", None)
+                if not piece:
+                    continue
+                if not produced:
+                    piece = piece.lstrip()  # modelos costumam abrir com quebra de linha/espaço
+                    if not piece:
+                        continue
+                    produced = True
+                yield piece
+        except APIStatusError as e:
+            if e.status_code == 404:
+                raise self._model_not_found(self.chat_model, e) from e
+            if e.status_code >= 500:
+                raise self._service_error(e) from e
+            raise
+        except APIConnectionError as e:
+            raise self._unreachable(e) from e
+
+        if not produced:
+            raise AIServiceUnavailableError(
+                "O modelo devolveu uma resposta vazia. Aumente OLLAMA_MAX_TOKENS "
+                "ou verifique o modelo."
+            )
 
     # ------------------------------------------------------------------ health
     async def ping(self) -> None:

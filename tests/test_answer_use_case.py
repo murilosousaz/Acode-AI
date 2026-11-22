@@ -3,6 +3,8 @@
 Python puro: não precisa de FastAPI, MongoDB nem Ollama.
 """
 
+import pytest
+
 from src.app.dtos.chat_dto import QuestionInput
 from src.app.use_cases.answer_student_question import (
     NO_CONTEXT_MESSAGE,
@@ -14,7 +16,7 @@ from src.domain.service.prompt_builder_service import (
     FOLLOW_UP_MAX_WORDS,
     PromptBuilderService,
 )
-from tests.fakes import EmptyDocRepo, FakeAI, FakeChatRepo, FakeDocRepo, ScriptedDocRepo, chunk
+from tests.fakes import EmptyDocRepo, FakeAI, FakeChatRepo, FakeDocRepo, MidStreamFailAI, ScriptedDocRepo, chunk
 
 HISTORY = [
     {"role": "user", "content": "O que é velocidade média?"},
@@ -156,3 +158,66 @@ async def test_without_relevant_chunks_the_default_message_is_returned_and_nothi
 
     assert result.answer == NO_CONTEXT_MESSAGE and result.sources == []
     assert ai.chat_calls == [] and "s1" not in chat_repo.data
+
+
+# ------------------------------------------------------------ streaming
+async def collect(answer):
+    return [piece async for piece in answer.tokens]
+
+
+async def test_stream_delivers_the_same_text_sources_and_history_as_execute():
+    use_case, chat_repo, _ = make_use_case()
+    streamed = await use_case.stream(QuestionInput("s1", "O que é velocidade média?", "Fisica"))
+    pieces = await collect(streamed)
+
+    plain_use_case, _, _ = make_use_case()
+    plain = await plain_use_case.execute(QuestionInput("s2", "O que é velocidade média?", "Fisica"))
+
+    assert pieces == FakeAI.PIECES and "".join(pieces) == plain.answer
+    assert streamed.sources == plain.sources and streamed.sources[0].title == "Cinemática"
+    assert [m.content for m in chat_repo.data["s1"]] == ["O que é velocidade média?", plain.answer]
+
+
+async def test_stream_only_saves_the_exchange_when_it_finishes():
+    use_case, chat_repo, _ = make_use_case()
+    streamed = await use_case.stream(QuestionInput("s1", "pergunta"))
+    iterator = streamed.tokens.__aiter__()
+    await iterator.__anext__()  # lê só o primeiro pedaço e "desiste"
+    await streamed.tokens.aclose()
+    assert "s1" not in chat_repo.data
+
+
+async def test_stream_failure_midway_is_raised_and_nothing_is_saved():
+    from src.domain.errors import AIServiceUnavailableError
+
+    use_case, chat_repo, _ = make_use_case(ai=MidStreamFailAI(after=1))
+    streamed = await use_case.stream(QuestionInput("s1", "pergunta"))
+    got = []
+    with pytest.raises(AIServiceUnavailableError):
+        async for piece in streamed.tokens:
+            got.append(piece)
+    assert got == ["A velocidade "] and "s1" not in chat_repo.data
+
+
+async def test_stream_retrieval_failures_surface_before_streaming_starts():
+    from src.domain.errors import AIServiceUnavailableError
+
+    use_case, _, _ = make_use_case(ai=FakeAI(fail=True))
+    with pytest.raises(AIServiceUnavailableError):
+        await use_case.stream(QuestionInput("s1", "pergunta"))  # o erro sai de stream(), não dos tokens
+
+
+async def test_stream_without_relevant_chunks_sends_the_default_message_and_saves_nothing():
+    use_case, chat_repo, ai = make_use_case(doc_repo=EmptyDocRepo())
+    streamed = await use_case.stream(QuestionInput("s1", "fora do material"))
+    assert streamed.sources == []
+    assert await collect(streamed) == [NO_CONTEXT_MESSAGE]
+    assert ai.chat_calls == [] and "s1" not in chat_repo.data
+
+
+async def test_stream_uses_the_same_follow_up_retrieval_as_execute():
+    use_case, chat_repo, ai = make_use_case()
+    await chat_repo.add_messages("s1", [Message("user", "O que é velocidade média?"), Message("assistant", "...")])
+    streamed = await use_case.stream(QuestionInput("s1", "e a aceleração?"))
+    await collect(streamed)
+    assert ai.embed_calls == [["e a aceleração?", "O que é velocidade média?\ne a aceleração?"]]

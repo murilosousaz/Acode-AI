@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from typing import List, Optional
 
 from src.domain.entities.document import DocumentChunk
+from src.domain.entities.embedding_stamp import EmbeddingStamp
 
 
 class DocumentRepository(ABC):
@@ -35,4 +36,9 @@ class DocumentRepository(ABC):
         Usado para que reingerir um PDF substitua os chunks antigos em vez de
         duplicá-los. Retorna quantos chunks foram apagados.
         """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def embedding_stamps(self) -> List[EmbeddingStamp]:
+        """Conta os chunks por configuração de vetorização (modelo + prefixo de documento)."""
         raise NotImplementedError

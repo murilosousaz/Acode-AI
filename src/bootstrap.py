@@ -1,9 +1,11 @@
 """Raiz de composição: monta repositórios, adaptadores e casos de uso."""
 
+import logging
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Dict
+from typing import Awaitable, Callable, Dict, Optional
 
 from src.app.use_cases.answer_student_question import AnswerStudentQuestionUseCase
+from src.app.use_cases.check_embedding_compatibility import CheckEmbeddingCompatibilityUseCase
 from src.app.use_cases.chat_history import ClearChatHistoryUseCase, GetChatHistoryUseCase
 from src.app.use_cases.ingest_educational_material import IngestEducationalMaterialUseCase
 from src.infrastructure.adapters.ollama_adapter import OllamaAdapter
@@ -11,6 +13,8 @@ from src.infrastructure.adapters.rate_limiter import SlidingWindowRateLimiter
 from src.infrastructure.config.settings import Settings
 from src.infrastructure.database.mongodb.mongo_chat_repo import MongoChatRepository
 from src.infrastructure.database.mongodb.mongo_document_repo import MongoDocumentRepository
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -23,6 +27,17 @@ class Container:
     rate_limiter: SlidingWindowRateLimiter
     # Verificações usadas por GET /health/ready: cada uma levanta exceção se falhar.
     readiness_checks: Dict[str, Callable[[], Awaitable[None]]]
+    # Diagnóstico do banco de vetores (usado no startup e em scripts/check_embeddings.py).
+    check_embeddings: Optional[CheckEmbeddingCompatibilityUseCase] = None
+
+
+async def warn_if_embeddings_are_stale(check: CheckEmbeddingCompatibilityUseCase) -> None:
+    """Loga (sem impedir a inicialização) se o banco foi vetorizado com outra configuração."""
+    try:
+        for line in (await check.execute()).lines():
+            logger.warning("Embeddings: %s", line)
+    except Exception:
+        logger.warning("Não foi possível verificar a compatibilidade dos embeddings.", exc_info=True)
 
 
 async def build_container(settings: Settings, db) -> Container:
@@ -37,7 +52,11 @@ async def build_container(settings: Settings, db) -> Container:
         embedding_dimensions=settings.EMBEDDING_DIMENSIONS,
         max_tokens=settings.OLLAMA_MAX_TOKENS,
         timeout=settings.OLLAMA_TIMEOUT_SECONDS,
+        query_prefix=settings.EMBEDDING_QUERY_PREFIX,
+        document_prefix=settings.EMBEDDING_DOCUMENT_PREFIX,
     )
+    check_embeddings = CheckEmbeddingCompatibilityUseCase(doc_repo, ollama)
+    await warn_if_embeddings_are_stale(check_embeddings)
 
     async def ping_mongo() -> None:
         await db.command("ping")
@@ -53,4 +72,5 @@ async def build_container(settings: Settings, db) -> Container:
             window_seconds=settings.RATE_LIMIT_WINDOW_SECONDS,
         ),
         readiness_checks={"mongodb": ping_mongo, "ollama": ollama.ping},
+        check_embeddings=check_embeddings,
     )

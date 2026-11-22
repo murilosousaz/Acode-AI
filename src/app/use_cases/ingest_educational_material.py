@@ -5,9 +5,9 @@ from typing import List, Optional
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from src.domain.entities.document import DocumentChunk
 from src.domain.ports import EmbeddingGenerator
 from src.domain.repositories.document_repository import DocumentRepository
+from src.domain.service.chunk_factory import build_chunks
 from src.infrastructure.adapters.pymupdf_adapter import PyMuPDFAdapter
 
 logger = logging.getLogger(__name__)
@@ -61,19 +61,15 @@ class IngestEducationalMaterialUseCase:
         embeddings = await self.embedding_generator.generate_embeddings(text_chunks)
 
         source = source_name or os.path.basename(pdf_path)
-        documents: List[DocumentChunk] = [
-            DocumentChunk(
-                content=chunk,
-                embedding=vector,
-                metadata={
-                    "title": title,
-                    "subject": subject,
-                    "chunk_index": i,
-                    "source_file": source,
-                },
-            )
-            for i, (chunk, vector) in enumerate(zip(text_chunks, embeddings))
-        ]
+        documents = build_chunks(
+            text_chunks,
+            embeddings,
+            title=title,
+            subject=subject,
+            source_file=source,
+            embedding_model=self.embedding_generator.embedding_model,
+            document_prefix=self.embedding_generator.document_prefix,
+        )
 
         # Reingerir o mesmo material substitui os chunks antigos (só depois de
         # os embeddings novos estarem prontos, para não perder dados se falhar).

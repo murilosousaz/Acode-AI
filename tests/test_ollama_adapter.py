@@ -140,3 +140,106 @@ async def test_embedding_5xx_after_all_retries_becomes_ai_unavailable(monkeypatc
     with pytest.raises(AIServiceUnavailableError):
         await adapter.generate_embeddings(["a"])
     assert calls["n"] == 3
+
+
+# ---------------------------------------------------------------- streaming
+def sse_chunks(*deltas, finish=True):
+    """Corpo SSE no formato do endpoint OpenAI-compatível do Ollama (None = chunk sem texto)."""
+    frames = []
+    for delta in deltas:
+        body = {"index": 0, "delta": {"content": delta} if delta is not None else {}, "finish_reason": None}
+        frames.append({"id": "c1", "object": "chat.completion.chunk", "created": 0, "model": "chat-m", "choices": [body]})
+    if finish:
+        frames.append({"id": "c1", "object": "chat.completion.chunk", "created": 0, "model": "chat-m",
+                       "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+    text = "".join(f"data: {json.dumps(f)}\n\n" for f in frames) + "data: [DONE]\n\n"
+    return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=text.encode())
+
+
+async def collect_stream(adapter):
+    return [p async for p in adapter.stream_chat_completion([{"role": "user", "content": "oi"}])]
+
+
+async def test_stream_yields_pieces_in_order_and_asks_for_stream_mode():
+    seen = {}
+
+    def handler(request):
+        seen.update(json.loads(request.content))
+        return sse_chunks("A ", "velocidade ", "média")
+
+    pieces = await collect_stream(make_adapter(handler))
+    assert pieces == ["A ", "velocidade ", "média"]
+    assert seen["stream"] is True and seen["model"] == "chat-m"
+
+
+async def test_stream_drops_leading_whitespace_and_empty_deltas():
+    pieces = await collect_stream(make_adapter(lambda r: sse_chunks("\n\n", None, " Olá", " mundo")))
+    assert pieces == ["Olá", " mundo"]
+
+
+async def test_stream_with_only_whitespace_becomes_ai_unavailable():
+    with pytest.raises(AIServiceUnavailableError, match="vazia"):
+        await collect_stream(make_adapter(lambda r: sse_chunks("  ", "\n")))
+
+
+async def test_stream_5xx_and_missing_model_become_ai_unavailable():
+    with pytest.raises(AIServiceUnavailableError, match="500"):
+        await collect_stream(make_adapter(lambda r: httpx.Response(500, json={"error": {"message": "crash"}})))
+    with pytest.raises(AIServiceUnavailableError, match="ollama pull"):
+        await collect_stream(make_adapter(lambda r: httpx.Response(404, json={"error": {"message": "not found"}})))
+
+
+async def test_stream_connection_failure_becomes_ai_unavailable():
+    def handler(request):
+        raise httpx.ConnectError("recusou", request=request)
+
+    with pytest.raises(AIServiceUnavailableError):
+        await collect_stream(make_adapter(handler))
+
+
+# ---------------------------------------------------------------- prefixos de embedding
+def embedding_response(request):
+    inputs = json.loads(request.content)["input"]
+    return httpx.Response(200, json={
+        "object": "list", "model": "emb-m", "usage": {"prompt_tokens": 1, "total_tokens": 1},
+        "data": [{"object": "embedding", "index": i, "embedding": [0.1, 0.2]} for i, _ in enumerate(inputs)],
+    })
+
+
+def capture_inputs(**adapter_options):
+    sent = []
+
+    def handler(request):
+        sent.append(json.loads(request.content)["input"])
+        return embedding_response(request)
+
+    return make_adapter(handler, **adapter_options), sent
+
+
+async def test_no_prefix_by_default_keeps_the_texts_untouched():
+    adapter, sent = capture_inputs()
+    await adapter.generate_embeddings(["a"], purpose="query")
+    await adapter.generate_embeddings(["b"])
+    assert sent == [["a"], ["b"]]
+
+
+async def test_query_and_document_prefixes_are_applied_by_purpose():
+    adapter, sent = capture_inputs(query_prefix="search_query: ", document_prefix="search_document: ")
+    await adapter.generate_embeddings(["O que é velocidade?"], purpose="query")
+    await adapter.generate_embeddings(["A velocidade é...", "Outro trecho"])  # padrão = document
+    assert sent == [
+        ["search_query: O que é velocidade?"],
+        ["search_document: A velocidade é...", "search_document: Outro trecho"],
+    ]
+
+
+async def test_prefix_is_applied_to_every_batch():
+    adapter, sent = capture_inputs(document_prefix="search_document:", embedding_batch_size=2)
+    await adapter.generate_embeddings(["a", "b", "c"])
+    assert sent == [["search_document: a", "search_document: b"], ["search_document: c"]]
+
+
+def test_prefix_is_normalized_so_a_dotenv_without_quotes_still_works():
+    adapter = make_adapter(lambda r: None, query_prefix="  search_query:  ", document_prefix="search_document: ")
+    assert adapter.query_prefix == "search_query: " and adapter.document_prefix == "search_document: "
+    assert make_adapter(lambda r: None, query_prefix="   ").query_prefix == ""

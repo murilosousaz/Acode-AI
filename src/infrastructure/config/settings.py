@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     # MongoDB e para validar a saída do modelo de embeddings. Se trocar de
     # modelo, ajuste este valor e recrie o índice + reingira os PDFs.
     EMBEDDING_DIMENSIONS: int = 768
+    # Prefixos de tarefa do modelo de embeddings. O nomic-embed-text foi treinado com
+    # "search_document:" nos textos guardados e "search_query:" nas perguntas, e a busca
+    # melhora usando-os. ATENÇÃO: mudar estes valores exige REINGERIR todos os PDFs
+    # (python -m scripts.ingest_bulks_pdf); a API avisa no log se houver incompatibilidade.
+    # Vazios = sem prefixo (padrão, compatível com o que já foi ingerido).
+    EMBEDDING_QUERY_PREFIX: str = ""
+    EMBEDDING_DOCUMENT_PREFIX: str = ""
 
     # Máximo de perguntas por cliente (IP) dentro da janela abaixo.
     RATE_LIMIT_REQUESTS: int = 5

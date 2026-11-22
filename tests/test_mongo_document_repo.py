@@ -59,3 +59,21 @@ async def test_database_errors_propagate():
 
     with pytest.raises(RuntimeError):
         await make_repo(FakeCollection(error=RuntimeError("index not found"))).search_similar_chunks([0.1])
+
+
+async def test_embedding_stamps_groups_chunks_by_model_and_document_prefix():
+    groups = [
+        {"_id": {"model": "nomic-embed-text", "prefix": "search_document: "}, "count": 120},
+        {"_id": {"model": None, "prefix": None}, "count": 30},  # chunks anteriores ao registro
+        {"_id": {"model": "nomic-embed-text", "prefix": ""}, "count": 5},
+    ]
+    collection = FakeCollection(groups)
+    stamps = await make_repo(collection).embedding_stamps()
+
+    group_stage = collection.pipeline[0]["$group"]
+    assert group_stage["_id"] == {"model": "$metadata.embedding_model", "prefix": "$metadata.embedding_document_prefix"}
+    assert [(s.model, s.document_prefix, s.count) for s in stamps] == [
+        ("nomic-embed-text", "search_document: ", 120),
+        (None, None, 30),
+        ("nomic-embed-text", "", 5),
+    ]

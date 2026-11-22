@@ -27,7 +27,7 @@ export class ApiError extends Error {
 
   /** Vale oferecer "Tentar de novo" com a mesma entrada? */
   get retryable() {
-    return ["network", "timeout", "unavailable", "server", "rate_limit", "aborted", "unexpected"].includes(this.kind);
+    return ["network", "timeout", "interrupted", "unavailable", "server", "rate_limit", "aborted", "unexpected"].includes(this.kind);
   }
 }
 
@@ -43,6 +43,11 @@ function describe(kind, { detail, retryAfter, base }) {
       return {
         title: "A resposta demorou demais",
         hint: "O tutor não respondeu a tempo. Tente de novo; perguntas mais curtas costumam ser mais rápidas.",
+      };
+    case "interrupted":
+      return {
+        title: "A resposta foi interrompida",
+        hint: "A conexão caiu antes de a resposta terminar. Tente de novo.",
       };
     case "aborted":
       return { title: "Pergunta cancelada", hint: "Você pode enviar de novo quando quiser." };
@@ -128,12 +133,79 @@ export function errorFromResponse(response, body, { base = "" } = {}) {
 }
 
 /**
+ * Leitor incremental de Server-Sent Events. `feed(texto)` aceita pedaços em qualquer ponto
+ * (inclusive no meio de um evento) e chama `onEvent(nome, dados)` a cada evento completo.
+ * Comentários (linhas iniciadas por ":", usadas como heartbeat) são ignorados.
+ */
+export function createSSEParser(onEvent) {
+  let buffer = "";
+  return {
+    feed(chunk) {
+      buffer += chunk;
+      let held = "";
+      if (buffer.endsWith("\r")) {
+        // Um "\r" no fim pode ser a metade de um "\r\n" que chega no próximo pedaço.
+        held = "\r";
+        buffer = buffer.slice(0, -1);
+      }
+      buffer = buffer.replace(/\r\n/g, "\n");
+
+      let end;
+      while ((end = buffer.indexOf("\n\n")) !== -1) {
+        const block = buffer.slice(0, end);
+        buffer = buffer.slice(end + 2);
+        dispatch(block, onEvent);
+      }
+      buffer += held;
+    },
+  };
+}
+
+function dispatch(block, onEvent) {
+  let name = null;
+  const data = [];
+  for (const line of block.split("\n")) {
+    if (line === "" || line.startsWith(":")) continue;
+    const colon = line.indexOf(":");
+    const field = colon === -1 ? line : line.slice(0, colon);
+    const value = colon === -1 ? "" : line.slice(colon + 1).replace(/^ /, "");
+    if (field === "event") name = value;
+    else if (field === "data") data.push(value);
+  }
+  if (name !== null || data.length > 0) onEvent(name ?? "message", data.join("\n"));
+}
+
+function normalizeSources(sources) {
+  return (Array.isArray(sources) ? sources : []).map((s) => ({
+    title: s.title ?? "Material",
+    subject: s.subject ?? "",
+    excerpt: s.excerpt ?? "",
+    score: s.score ?? null,
+  }));
+}
+
+/**
  * Cria o cliente. `fetchImpl` e `baseUrl` são injetáveis (testes, front hospedado à parte).
  * baseUrl "" = mesma origem da página (o caso normal: a API serve o front).
  */
 export function createClient({ baseUrl = "", fetchImpl, chatTimeoutMs = DEFAULT_CHAT_TIMEOUT_MS } = {}) {
   const base = String(baseUrl || "").replace(/\/+$/, "");
   const doFetch = fetchImpl ?? ((...args) => globalThis.fetch(...args));
+  let streamSupported = true;
+
+  function fetchFailure(error, { timedOut, signal }) {
+    if (timedOut) return new ApiError("timeout");
+    if (error?.name === "AbortError" || signal?.aborted) return new ApiError("aborted");
+    return new ApiError("network");
+  }
+
+  // Mesmo contrato do streaming, usando o endpoint clássico: entrega tudo de uma vez.
+  async function viaClassicEndpoint(input, { signal, onMeta, onToken }) {
+    const result = await client.sendMessage(input, { signal });
+    onMeta?.({ sessionId: result.sessionId, sources: result.sources });
+    onToken?.(result.answer);
+    return result;
+  }
 
   async function request(path, { method = "GET", json, form, headers = {}, signal, timeoutMs = 30_000 } = {}) {
     if (signal?.aborted) throw new ApiError("aborted");
@@ -185,7 +257,7 @@ export function createClient({ baseUrl = "", fetchImpl, chatTimeoutMs = DEFAULT_
     }
   }
 
-  return {
+  const client = {
     baseUrl: base,
 
     async listSubjects({ signal } = {}) {
@@ -212,13 +284,125 @@ export function createClient({ baseUrl = "", fetchImpl, chatTimeoutMs = DEFAULT_
       return {
         sessionId: data.session_id ?? sessionId ?? null,
         answer: data.answer,
-        sources: data.sources.map((s) => ({
-          title: s.title ?? "Material",
-          subject: s.subject ?? "",
-          excerpt: s.excerpt ?? "",
-          score: s.score ?? null,
-        })),
+        sources: normalizeSources(data.sources),
       };
+    },
+
+    /**
+     * Como sendMessage, mas a resposta chega aos pedaços (SSE): `onMeta({ sessionId, sources })`
+     * uma vez, `onToken(texto)` a cada pedaço. Devolve o mesmo { sessionId, answer, sources }.
+     * O limite de tempo vale entre pedaços (silêncio), não para a resposta inteira.
+     * Se a API não tiver o endpoint de streaming (404/405), cai no endpoint clássico — e lembra disso.
+     */
+    async streamMessage({ question, subject, sessionId }, { signal, onMeta, onToken } = {}) {
+      if (!streamSupported) return viaClassicEndpoint({ question, subject, sessionId }, { signal, onMeta, onToken });
+      if (signal?.aborted) throw new ApiError("aborted");
+
+      const payload = { question };
+      if (subject) payload.subject = subject;
+      if (sessionId) payload.session_id = sessionId;
+
+      const controller = new AbortController();
+      let timedOut = false;
+      let timer;
+      const arm = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, chatTimeoutMs);
+      };
+      const onAbort = () => controller.abort();
+      signal?.addEventListener("abort", onAbort, { once: true });
+      arm();
+
+      const result = { sessionId: sessionId ?? null, answer: "", sources: [] };
+      let finished = false;
+      let streamError = null;
+      let received = false;
+
+      const parser = createSSEParser((name, raw) => {
+        let data = {};
+        try {
+          data = raw ? JSON.parse(raw) : {};
+        } catch {
+          return; // evento ilegível: ignora
+        }
+        if (name === "meta") {
+          result.sessionId = data.session_id ?? result.sessionId;
+          result.sources = normalizeSources(data.sources);
+          onMeta?.({ sessionId: result.sessionId, sources: result.sources });
+        } else if (name === "token" && typeof data.text === "string") {
+          received = true;
+          result.answer += data.text;
+          onToken?.(data.text);
+        } else if (name === "done") {
+          finished = true;
+        } else if (name === "error") {
+          streamError = new ApiError(data.status === 503 ? "unavailable" : "server", { status: data.status ?? 0, detail: data.detail });
+        }
+      });
+
+      try {
+        let response;
+        try {
+          response = await doFetch(`${base}${API_PREFIX}/chat/messages/stream`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+            body: JSON.stringify(payload),
+            signal: controller.signal,
+          });
+        } catch (error) {
+          throw fetchFailure(error, { timedOut, signal });
+        }
+
+        if (response.status === 404 || response.status === 405) {
+          streamSupported = false; // API sem streaming: usa o endpoint clássico daqui em diante
+          return viaClassicEndpoint({ question, subject, sessionId }, { signal, onMeta, onToken });
+        }
+        if (!response.ok) {
+          const text = await response.text().catch(() => "");
+          let body = null;
+          try {
+            body = text ? JSON.parse(text) : null;
+          } catch {
+            body = null;
+          }
+          throw errorFromResponse(response, body, { base });
+        }
+        if (!(response.headers.get("Content-Type") ?? "").includes("text/event-stream")) {
+          throw new ApiError("unexpected", { status: response.status });
+        }
+
+        try {
+          if (response.body?.getReader) {
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              arm(); // chegou algo (inclusive heartbeat): recomeça a contagem de silêncio
+              parser.feed(decoder.decode(value, { stream: true }));
+            }
+            parser.feed(decoder.decode());
+          } else {
+            parser.feed(await response.text());
+          }
+        } catch (error) {
+          if (error instanceof ApiError) throw error;
+          const failure = fetchFailure(error, { timedOut, signal });
+          // A conexão caiu no meio, depois de já termos recebido texto.
+          throw failure.kind === "network" && received ? new ApiError("interrupted") : failure;
+        }
+
+        if (streamError) throw streamError;
+        if (!finished) throw new ApiError(received ? "interrupted" : "network");
+        if (!result.answer.trim()) throw new ApiError("unexpected");
+        return result;
+      } finally {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+      }
     },
 
     async getHistory(sessionId, { signal } = {}) {
@@ -256,4 +440,5 @@ export function createClient({ baseUrl = "", fetchImpl, chatTimeoutMs = DEFAULT_
       });
     },
   };
+  return client;
 }

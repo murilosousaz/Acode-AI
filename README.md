@@ -30,6 +30,7 @@ OpenAPI em `/openapi.json` serve para gerar um client tipado no frontend.
 | Método | Rota                              | Descrição                                           |
 |--------|-----------------------------------|-----------------------------------------------------|
 | POST   | `/api/v1/chat/messages`           | Envia uma dúvida e recebe a resposta + fontes        |
+| POST   | `/api/v1/chat/messages/stream`    | Igual, com a resposta chegando aos pedaços (SSE)     |
 | GET    | `/api/v1/chat/sessions/{id}`      | Histórico da conversa                                |
 | DELETE | `/api/v1/chat/sessions/{id}`      | Apaga o histórico da conversa (204)                  |
 | GET    | `/api/v1/subjects`                | Matérias válidas para o filtro (`value` + `label`)   |
@@ -65,6 +66,46 @@ curl -X POST http://localhost:8000/api/v1/chat/messages \
 - Se o Ollama estiver fora do ar ou sem o modelo → `503`.
 - Quando nenhum trecho relevante é encontrado, `answer` traz uma mensagem
   padrão, `sources` vem vazio e a troca não entra no histórico.
+
+### Chat em streaming (SSE)
+
+`POST /api/v1/chat/messages/stream` recebe o mesmo corpo de `/chat/messages`, mas
+responde `text/event-stream`: o texto aparece conforme o modelo o escreve (o
+primeiro pedaço chega em poucos segundos, em vez de esperar a resposta inteira).
+
+```bash
+curl -N -X POST http://localhost:8000/api/v1/chat/messages/stream \
+  -H "Content-Type: application/json" \
+  -d '{"question": "O que é velocidade média?"}'
+```
+
+```text
+event: meta
+data: {"session_id": "8f1c…", "sources": [{"title": "Cinemática - Cap. 1", "subject": "Fisica", "excerpt": "...", "score": 0.91}]}
+
+event: token
+data: {"text": "A **velocidade média** "}
+
+event: token
+data: {"text": "é a razão entre ..."}
+
+event: done
+data: {}
+```
+
+- `meta` vem primeiro (a busca nos materiais já terminou); depois, zero ou mais
+  `token`; no fim, `done`. Se o modelo cair no meio, em vez de `done` vem
+  `event: error` com `{"status": 503, "detail": "..."}`, e **a troca não entra no
+  histórico** (respostas interrompidas nunca são gravadas).
+- Erros que acontecem *antes* do primeiro byte (422, 429, falha na busca) são
+  respostas HTTP normais, como no endpoint clássico. O rate limit é o mesmo.
+- Linhas começando com `:` são heartbeat (a cada 15 s) para proxies não derrubarem
+  a conexão enquanto o modelo carrega; ignore-as. Atrás de nginx, o header
+  `X-Accel-Buffering: no` já é enviado.
+- O frontend usa este endpoint por padrão e cai no clássico se a API não o tiver;
+  para desligar, `stream: false` em `frontend/config.js`.
+- Modelos "thinking" (qwen3, deepseek-r1) não têm o raciocínio transmitido, só a
+  resposta final; nesses modelos a espera até o primeiro pedaço é maior.
 
 ### Upload de PDF (admin)
 
@@ -118,7 +159,8 @@ configurar:
 | `http://localhost:8000/admin/`| Área do professor: envia PDFs (pede a `ADMIN_API_KEY`)  |
 
 O que o aluno encontra: perguntas de exemplo para começar, filtro por matéria,
-respostas em Markdown com fórmulas (KaTeX), fontes recolhíveis, atalhos de
+respostas que aparecem enquanto são escritas (streaming, com botão **Parar**), em
+Markdown com fórmulas (KaTeX), fontes recolhíveis, atalhos de
 continuação ("Explique de outro jeito", "Dê um exemplo"), conversa que continua
 depois de recarregar a página, aviso de limite de perguntas com contagem
 regressiva e mensagens de erro em português com "Tentar de novo". Funciona no
@@ -184,6 +226,8 @@ o rate limit enxergar o IP real do cliente.
 | `CORS_ALLOW_ORIGINS`        |             | Origens do frontend, separadas por vírgula                          |
 | `MAX_UPLOAD_MB`             |             | Tamanho máximo do PDF (padrão: `25`)                                |
 | `SERVE_FRONTEND`            |             | Serve `frontend/` em `/` (padrão: `true`)                           |
+| `EMBEDDING_QUERY_PREFIX`    |             | Prefixo das perguntas na busca (ex.: `search_query:`). Vazio = nenhum |
+| `EMBEDDING_DOCUMENT_PREFIX` |             | Prefixo dos textos ingeridos (ex.: `search_document:`). Vazio = nenhum |
 | `OLLAMA_BASE_URL`           |             | Endpoint OpenAI-compatível (padrão: `http://localhost:11434/v1`)    |
 | `OLLAMA_CHAT_MODEL`         |             | Modelo de chat (padrão: `qwen2.5:7b`)                               |
 | `OLLAMA_EMBEDDING_MODEL`    |             | Modelo de embeddings (padrão: `nomic-embed-text`)                   |
@@ -216,6 +260,36 @@ uv add --dev playwright && uv run playwright install chromium
 uv run pytest tests/e2e
 ```
 
+## Prefixos de embedding (melhora a busca com o nomic-embed-text)
+
+O `nomic-embed-text` foi treinado para receber `search_document:` antes dos textos
+guardados e `search_query:` antes das perguntas. Com os prefixos, a busca costuma
+trazer trechos mais relevantes. Por padrão eles ficam **desligados**, para não
+invalidar o que você já ingeriu.
+
+Para ligar (os dois, sempre juntos), no `.env`:
+
+```bash
+EMBEDDING_QUERY_PREFIX=search_query:
+EMBEDDING_DOCUMENT_PREFIX=search_document:
+```
+
+> ⚠️ **Depois de mudar, reingira todos os PDFs.** Os vetores já gravados foram feitos
+> sem prefixo; misturá-los com perguntas *com* prefixo não dá erro, só piora a busca
+> em silêncio.
+
+```bash
+uv run python -m scripts.ingest_bulks_pdf     # reingere data/raw_pdfs/ (substitui os chunks antigos)
+uv run python -m scripts.check_embeddings     # confirma: "Tudo certo" (sai com código 1 se não)
+```
+
+Para não depender de memória, cada chunk guarda com qual modelo/prefixo foi vetorizado
+(`metadata.embedding_model` e `metadata.embedding_document_prefix`). Na inicialização a
+API compara isso com a configuração atual e escreve um aviso no log se houver chunks
+desatualizados, ou se só um dos dois prefixos estiver configurado. Chunks ingeridos antes
+desta versão (sem registro) contam como "sem prefixo". Se algo ficar pior, desligue os
+prefixos e reingira de novo. O mesmo vale ao trocar `OLLAMA_EMBEDDING_MODEL`.
+
 ## Notas de migração
 
 - **Discord → API:** o bot, os cogs e o `DiscordFormatter` foram removidos. O
@@ -234,14 +308,11 @@ uv run pytest tests/e2e
 - Sem autenticação de usuários: o `session_id` (UUID não adivinhável) é a única
   proteção de uma conversa. Para contas reais, adicione login/JWT e associe as
   sessões ao usuário.
-- A resposta do chat não é transmitida em streaming; com modelos locais ela pode
-  levar dezenas de segundos (o frontend mostra o tempo decorrido e permite
-  cancelar). SSE em `/chat/messages/stream` é o próximo passo natural.
 - O rate limit é por IP: numa escola ou cursinho todos os alunos compartilham o
   mesmo IP de saída. Ajuste `RATE_LIMIT_REQUESTS` para o tamanho das turmas.
 - O rate limiter é em memória por processo; com várias réplicas, migre para Redis.
 - `PyMuPDFAdapter` não faz OCR: PDFs digitalizados não geram texto.
 - O driver `motor` está depreciado (fim do suporte previsto para maio/2027);
   migrar para a API assíncrona nativa do PyMongo.
-- O `nomic-embed-text` rende melhor com os prefixos `search_document: ` (ingestão)
-  e `search_query: ` (pergunta); ainda não aplicados.
+- Os prefixos do `nomic-embed-text` são opcionais e vêm desligados (ver a seção
+  *Prefixos de embedding*); ligá-los exige reingerir os PDFs.
